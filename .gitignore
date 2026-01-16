@@ -1,0 +1,10 @@
+.direnv
+.zig-cache
+# TDLib directories
+
+tdlib/
+tdlib-bin/
+tdlib.tar.gz
+tdlib-bin.zip
+
+zig-out
