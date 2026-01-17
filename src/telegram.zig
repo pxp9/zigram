@@ -1,7 +1,6 @@
 const std = @import("std");
 const tdlib = @import("tdlib.zig");
-const log = @import("log.zig");
-const addLog = log.addLog;
+const vaxis = @import("vaxis");
 
 pub const Chat = struct {
     id: i64,
@@ -34,8 +33,57 @@ fn formatRequestZ(allocator: std.mem.Allocator, comptime fmt: []const u8, args: 
     return try allocator.dupeZ(u8, str);
 }
 
+/// Get user name from user_id (returns "Unknown" if not found)
+pub fn getUserName(
+    client: *tdlib.Client,
+    allocator: std.mem.Allocator,
+    user_id: i64,
+) ![]const u8 {
+    // Request user info
+    const request = try formatRequestZ(
+        allocator,
+        "{{\"@type\":\"getUser\",\"user_id\":{d}}}",
+        .{user_id},
+    );
+    defer allocator.free(request);
+    client.send(request);
+
+    // Wait for response (short timeout since this should be cached)
+    var attempts: u32 = 0;
+    while (attempts < 20) : (attempts += 1) {
+        const response_opt = client.receive(0.05);
+        if (response_opt) |response| {
+            const parsed = std.json.parseFromSlice(
+                std.json.Value,
+                allocator,
+                response,
+                .{},
+            ) catch continue;
+            defer parsed.deinit();
+
+            const value = parsed.value;
+            const update_type = value.object.get("@type") orelse continue;
+
+            if (std.mem.eql(u8, update_type.string, "user")) {
+                const first_name = value.object.get("first_name") orelse continue;
+                const last_name_opt = value.object.get("last_name");
+
+                // Build full name
+                if (last_name_opt) |last_name| {
+                    if (last_name.string.len > 0) {
+                        return try std.fmt.allocPrint(allocator, "{s} {s}", .{ first_name.string, last_name.string });
+                    }
+                }
+                return try allocator.dupe(u8, first_name.string);
+            }
+        }
+    }
+
+    return try allocator.dupe(u8, "Unknown");
+}
+
 /// Fetch the list of chats from Telegram
-pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32, log_messages: *std.ArrayList([]const u8), log_file: std.fs.File) !std.ArrayList(Chat) {
+pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32) !std.ArrayList(Chat) {
     var chats: std.ArrayList(Chat) = .empty;
     errdefer {
         for (chats.items) |*chat| {
@@ -51,7 +99,7 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32,
         .{limit},
     );
     defer allocator.free(load_request);
-    try addLog(log_messages, allocator, log_file, "Sending loadChats request: {s}", .{load_request});
+    std.log.info("Sending loadChats request: {s}", .{load_request});
     client.send(load_request);
 
     // Wait a bit for loadChats to process
@@ -59,7 +107,7 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32,
     while (load_attempts < 30) : (load_attempts += 1) {
         const load_response_opt = client.receive(0.1);
         if (load_response_opt) |load_response| {
-            try addLog(log_messages, allocator, log_file, "loadChats response: {s}", .{load_response[0..@min(load_response.len, 300)]});
+            std.log.info("loadChats response: {s}", .{load_response[0..@min(load_response.len, 300)]});
             const parsed = std.json.parseFromSlice(
                 std.json.Value,
                 allocator,
@@ -73,7 +121,7 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32,
 
             // Look for ok response or updateChatLastMessage
             if (std.mem.eql(u8, update_type.string, "ok")) {
-                try addLog(log_messages, allocator, log_file, "loadChats succeeded", .{});
+                std.log.info("loadChats succeeded", .{});
                 break;
             }
         }
@@ -86,19 +134,19 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32,
         .{limit},
     );
     defer allocator.free(request);
-    try addLog(log_messages, allocator, log_file, "Sending getChats request: {s}", .{request});
+    std.log.info("Sending getChats request: {s}", .{request});
     client.send(request);
 
     // Wait for response with longer timeout
     var attempts: u32 = 0;
     var got_chats = false;
-    try addLog(log_messages, allocator, log_file, "Waiting for getChats response...", .{});
+    std.log.info("Waiting for getChats response...", .{});
     while (attempts < 100) : (attempts += 1) { // 10 seconds timeout
         const response_opt = client.receive(0.1);
         if (response_opt) |response| {
             // Log to stderr for debugging
             if (attempts < 5 or attempts % 10 == 0) {
-                try addLog(log_messages, allocator, log_file, "Received response (attempt {d}): {s}", .{ attempts, response });
+                std.log.info("Received response (attempt {d}): {s}", .{ attempts, response });
             }
             const parsed = std.json.parseFromSlice(
                 std.json.Value,
@@ -106,38 +154,38 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32,
                 response,
                 .{},
             ) catch |err| {
-                try addLog(log_messages, allocator, log_file, "JSON parse error: {any}", .{err});
+                std.log.info("JSON parse error: {any}", .{err});
                 continue;
             };
             defer parsed.deinit();
 
             const value = parsed.value;
             const update_type = value.object.get("@type") orelse {
-                try addLog(log_messages, allocator, log_file, "No @type field in response", .{});
+                std.log.info("No @type field in response", .{});
                 continue;
             };
 
             // Skip other updates
-            try addLog(log_messages, allocator, log_file, "Update type: {s}", .{update_type.string});
+            std.log.info("Update type: {s}", .{update_type.string});
             if (!std.mem.eql(u8, update_type.string, "chats") and
                 !std.mem.eql(u8, update_type.string, "chat")) {
-                try addLog(log_messages, allocator, log_file, "Skipping update type: {s}", .{update_type.string});
+                std.log.info("Skipping update type: {s}", .{update_type.string});
                 continue;
             }
 
             if (std.mem.eql(u8, update_type.string, "chats")) {
                 got_chats = true;
-                try addLog(log_messages, allocator, log_file, "Got chats response!", .{});
+                std.log.info("Got chats response!", .{});
                 const chat_ids = value.object.get("chat_ids") orelse {
-                    try addLog(log_messages, allocator, log_file, "No chat_ids field in chats response", .{});
+                    std.log.info("No chat_ids field in chats response", .{});
                     continue;
                 };
 
                 // Now get details for each chat
-                try addLog(log_messages, allocator, log_file, "Found {d} chat IDs", .{chat_ids.array.items.len});
+                std.log.info("Found {d} chat IDs", .{chat_ids.array.items.len});
                 for (chat_ids.array.items) |chat_id_value| {
                     const chat_id = chat_id_value.integer;
-                    try addLog(log_messages, allocator, log_file, "Requesting details for chat ID: {d}", .{chat_id});
+                    std.log.info("Requesting details for chat ID: {d}", .{chat_id});
                     const chat_request = try formatRequestZ(
                         allocator,
                         "{{\"@type\":\"getChat\",\"chat_id\":{d}}}",
@@ -150,11 +198,11 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32,
                 // Collect chat details
                 var chat_attempts: u32 = 0;
                 const expected_chats = chat_ids.array.items.len;
-                try addLog(log_messages, allocator, log_file, "Collecting details for {d} chats...", .{expected_chats});
+                std.log.info("Collecting details for {d} chats...", .{expected_chats});
                 while (chat_attempts < 50 and chats.items.len < expected_chats) : (chat_attempts += 1) {
                     const chat_response_opt = client.receive(0.1);
                     if (chat_response_opt) |chat_response| {
-                        try addLog(log_messages, allocator, log_file, "Got chat detail response (attempt {d}/{d} collected): {s}", .{ chat_attempts, chats.items.len, chat_response });
+                        std.log.info("Got chat detail response (attempt {d}/{d} collected): {s}", .{ chat_attempts, chats.items.len, chat_response });
                         const chat_parsed = std.json.parseFromSlice(
                             std.json.Value,
                             allocator,
@@ -167,9 +215,9 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32,
                         const chat_type = chat_value.object.get("@type") orelse continue;
 
                         // Skip non-chat updates
-                        try addLog(log_messages, allocator, log_file, "Chat detail update type: {s}", .{chat_type.string});
+                        std.log.info("Chat detail update type: {s}", .{chat_type.string});
                         if (!std.mem.eql(u8, chat_type.string, "chat")) {
-                            try addLog(log_messages, allocator, log_file, "Skipping non-chat update: {s}", .{chat_type.string});
+                            std.log.info("Skipping non-chat update: {s}", .{chat_type.string});
                             continue;
                         }
 
@@ -188,7 +236,7 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32,
                                 }
                             }
 
-                            try addLog(log_messages, allocator, log_file, "Adding chat: {s} (ID: {d})", .{ title, id });
+                            std.log.info("Adding chat: {s} (ID: {d})", .{ title, id });
                             try chats.append(allocator, Chat{
                                 .id = id,
                                 .title = try allocator.dupe(u8, title),
@@ -199,9 +247,9 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32,
                 }
 
                 // Return whatever chats we got, even if not all
-                try addLog(log_messages, allocator, log_file, "Collected {d} chats out of {d} expected", .{ chats.items.len, expected_chats });
+                std.log.info("Collected {d} chats out of {d} expected", .{ chats.items.len, expected_chats });
                 if (chats.items.len > 0 or got_chats) {
-                    try addLog(log_messages, allocator, log_file, "Returning {d} chats", .{chats.items.len});
+                    std.log.info("Returning {d} chats", .{chats.items.len});
                     return chats;
                 }
             }
@@ -209,13 +257,13 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32,
     }
 
     // If we got chats but they're incomplete, return what we have
-    try addLog(log_messages, allocator, log_file, "Timeout reached after {d} attempts", .{attempts});
+    std.log.info("Timeout reached after {d} attempts", .{attempts});
     if (chats.items.len > 0) {
-        try addLog(log_messages, allocator, log_file, "Returning {d} incomplete chats", .{chats.items.len});
+        std.log.info("Returning {d} incomplete chats", .{chats.items.len});
         return chats;
     }
 
-    try addLog(log_messages, allocator, log_file, "No chats received, returning timeout error", .{});
+    std.log.info("No chats received, returning timeout error", .{});
     return error.Timeout;
 }
 
@@ -225,8 +273,6 @@ pub fn getChatHistory(
     allocator: std.mem.Allocator,
     chat_id: i64,
     limit: i32,
-    log_messages: *std.ArrayList([]const u8),
-    log_file: std.fs.File,
 ) !std.ArrayList(Message) {
     var messages: std.ArrayList(Message) = .empty;
     errdefer {
@@ -238,7 +284,7 @@ pub fn getChatHistory(
 
     // First, drain pending updates from TDLib's queue
     // This ensures our getChatHistory request gets processed quickly
-    try addLog(log_messages, allocator, log_file, "Draining pending updates before getChatHistory...", .{});
+    std.log.info("Draining pending updates before getChatHistory...", .{});
     var drain_count: u32 = 0;
     while (drain_count < 100) : (drain_count += 1) {
         const drain_response = client.receive(0.01); // Very short timeout
@@ -246,7 +292,7 @@ pub fn getChatHistory(
             break; // No more pending updates
         }
     }
-    try addLog(log_messages, allocator, log_file, "Drained {d} pending updates", .{drain_count});
+    std.log.info("Drained {d} pending updates", .{drain_count});
 
     // Request chat history
     const request = try formatRequestZ(
@@ -255,53 +301,53 @@ pub fn getChatHistory(
         .{ chat_id, limit },
     );
     defer allocator.free(request);
-    try addLog(log_messages, allocator, log_file, "Sending getChatHistory request for chat {d}: {s}", .{ chat_id, request });
+    std.log.info("Sending getChatHistory request for chat {d}: {s}", .{ chat_id, request });
     client.send(request);
 
     // Wait for response with reasonable timeout (should be quick after draining updates)
     var attempts: u32 = 0;
-    try addLog(log_messages, allocator, log_file, "Waiting for getChatHistory response...", .{});
+    std.log.info("Waiting for getChatHistory response...", .{});
     while (attempts < 100) : (attempts += 1) { // 10 seconds timeout
         const response_opt = client.receive(0.1);
         if (response_opt) |response| {
-            try addLog(log_messages, allocator, log_file, "Received getChatHistory response (attempt {d}): {s}", .{ attempts, response });
+            std.log.info("Received getChatHistory response (attempt {d}): {s}", .{ attempts, response });
             const parsed = std.json.parseFromSlice(
                 std.json.Value,
                 allocator,
                 response,
                 .{},
             ) catch |err| {
-                try addLog(log_messages, allocator, log_file, "getChatHistory JSON parse error: {any}", .{err});
+                std.log.info("getChatHistory JSON parse error: {any}", .{err});
                 continue;
             };
             defer parsed.deinit();
 
             const value = parsed.value;
             const update_type = value.object.get("@type") orelse {
-                try addLog(log_messages, allocator, log_file, "getChatHistory: No @type field", .{});
+                std.log.info("getChatHistory: No @type field", .{});
                 continue;
             };
 
             // Skip non-message updates
-            try addLog(log_messages, allocator, log_file, "getChatHistory update type: {s}", .{update_type.string});
+            std.log.info("getChatHistory update type: {s}", .{update_type.string});
             if (!std.mem.eql(u8, update_type.string, "messages")) {
-                try addLog(log_messages, allocator, log_file, "Skipping non-messages update: {s}", .{update_type.string});
+                std.log.info("Skipping non-messages update: {s}", .{update_type.string});
                 continue;
             }
 
             if (std.mem.eql(u8, update_type.string, "messages")) {
-                try addLog(log_messages, allocator, log_file, "Got messages response!", .{});
+                std.log.info("Got messages response!", .{});
                 const msgs = value.object.get("messages") orelse {
-                    try addLog(log_messages, allocator, log_file, "No messages field in messages response", .{});
+                    std.log.info("No messages field in messages response", .{});
                     continue;
                 };
 
-                try addLog(log_messages, allocator, log_file, "Found {d} messages", .{msgs.array.items.len});
+                std.log.info("Found {d} messages", .{msgs.array.items.len});
 
                 // If we got 0 messages, TDLib might still be loading from server
                 // Try one more time after a short delay
                 if (msgs.array.items.len == 0) {
-                    try addLog(log_messages, allocator, log_file, "Got 0 messages, TDLib may be loading from server. Retrying once...", .{});
+                    std.log.info("Got 0 messages, TDLib may be loading from server. Retrying once...", .{});
 
                     // Drain any pending updates
                     var retry_drain: u32 = 0;
@@ -331,18 +377,24 @@ pub fn getChatHistory(
 
                             if (std.mem.eql(u8, retry_type.string, "messages")) {
                                 const retry_msgs = retry_value.object.get("messages") orelse continue;
-                                try addLog(log_messages, allocator, log_file, "Retry found {d} messages", .{retry_msgs.array.items.len});
+                                std.log.info("Retry found {d} messages", .{retry_msgs.array.items.len});
 
                                 for (retry_msgs.array.items) |msg_value| {
                                     const msg_id = msg_value.object.get("id").?.integer;
                                     const is_outgoing = msg_value.object.get("is_outgoing").?.bool;
 
                                     var sender_name: []const u8 = "Unknown";
-                                    if (msg_value.object.get("sender_id")) |sender| {
-                                        if (sender.object.get("user_id")) |_| {
-                                            sender_name = if (is_outgoing) "You" else "Contact";
+                                    var sender_name_owned = false;
+                                    if (is_outgoing) {
+                                        sender_name = "You";
+                                    } else if (msg_value.object.get("sender_id")) |sender| {
+                                        if (sender.object.get("user_id")) |user_id_val| {
+                                            const user_id = user_id_val.integer;
+                                            sender_name = getUserName(client, allocator, user_id) catch "Unknown";
+                                            sender_name_owned = true;
                                         }
                                     }
+                                    defer if (sender_name_owned) allocator.free(sender_name);
 
                                     var content: []const u8 = "";
                                     if (msg_value.object.get("content")) |msg_content| {
@@ -363,14 +415,14 @@ pub fn getChatHistory(
                                     });
                                 }
 
-                                try addLog(log_messages, allocator, log_file, "Returning {d} messages after retry", .{messages.items.len});
+                                std.log.info("Returning {d} messages after retry", .{messages.items.len});
                                 return messages;
                             }
                         }
                     }
 
                     // If retry also failed, return empty
-                    try addLog(log_messages, allocator, log_file, "Retry also returned 0 messages, chat may be empty", .{});
+                    std.log.info("Retry also returned 0 messages, chat may be empty", .{});
                     return messages;
                 }
 
@@ -378,16 +430,21 @@ pub fn getChatHistory(
                 for (msgs.array.items) |msg_value| {
                     const msg_id = msg_value.object.get("id").?.integer;
                     const is_outgoing = msg_value.object.get("is_outgoing").?.bool;
-                    try addLog(log_messages, allocator, log_file, "Processing message ID: {d}", .{msg_id});
+                    std.log.info("Processing message ID: {d}", .{msg_id});
 
                     // Get sender name
                     var sender_name: []const u8 = "Unknown";
-                    if (msg_value.object.get("sender_id")) |sender| {
-                        if (sender.object.get("user_id")) |_| {
-                            // For now, just show "You" for outgoing messages
-                            sender_name = if (is_outgoing) "You" else "Contact";
+                    var sender_name_owned = false;
+                    if (is_outgoing) {
+                        sender_name = "You";
+                    } else if (msg_value.object.get("sender_id")) |sender| {
+                        if (sender.object.get("user_id")) |user_id_val| {
+                            const user_id = user_id_val.integer;
+                            sender_name = getUserName(client, allocator, user_id) catch "Unknown";
+                            sender_name_owned = true;
                         }
                     }
+                    defer if (sender_name_owned) allocator.free(sender_name);
 
                     // Get message content
                     var content: []const u8 = "";
@@ -410,13 +467,13 @@ pub fn getChatHistory(
                     });
                 }
 
-                try addLog(log_messages, allocator, log_file, "Returning {d} messages", .{messages.items.len});
+                std.log.info("Returning {d} messages", .{messages.items.len});
                 return messages;
             }
         }
     }
 
-    try addLog(log_messages, allocator, log_file, "getChatHistory timeout after {d} attempts", .{attempts});
+    std.log.info("getChatHistory timeout after {d} attempts", .{attempts});
     return error.Timeout;
 }
 
@@ -435,4 +492,206 @@ pub fn sendMessage(
     );
     defer allocator.free(request);
     client.send(request);
+}
+
+// Telegram update loop types and function
+
+pub const TelegramUpdateKind = enum {
+    new_message,
+    message_edited,
+    message_deleted,
+    chat_updated,
+    chats_loaded,
+    chat_history_loaded,
+    thread_shutdown,
+    unknown,
+};
+
+pub const TelegramUpdate = struct {
+    kind: TelegramUpdateKind,
+    chat_id: i64,
+    data: []const u8, // JSON string
+};
+
+pub const TelegramRequestKind = enum {
+    load_chats,
+    load_chat_history,
+    send_message,
+    shutdown,
+};
+
+pub const TelegramRequest = union(TelegramRequestKind) {
+    load_chats: struct { count: usize },
+    load_chat_history: struct { chat_id: i64, limit: usize },
+    send_message: struct { chat_id: i64, text: []const u8 },
+    shutdown: void,
+};
+
+pub const TelegramQueue = struct {
+    mutex: std.Thread.Mutex = .{},
+    requests: std.ArrayList(TelegramRequest),
+    alloc: std.mem.Allocator,
+
+    pub fn init(alloc: std.mem.Allocator) TelegramQueue {
+        return .{
+            .requests = .empty,
+            .alloc = alloc,
+        };
+    }
+
+    pub fn deinit(self: *TelegramQueue) void {
+        self.requests.deinit(self.alloc);
+    }
+
+    pub fn postRequest(self: *TelegramQueue, request: TelegramRequest) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.requests.append(self.alloc, request);
+    }
+
+    pub fn nextRequest(self: *TelegramQueue) ?TelegramRequest {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.requests.items.len == 0) return null;
+        return self.requests.orderedRemove(0);
+    }
+};
+
+pub fn telegramUpdateLoop(ctx: anytype) void {
+    while (true) {
+        // Process pending requests
+        while (ctx.request_queue.nextRequest()) |request| {
+            switch (request) {
+                .load_chats => |req| {
+                    std.log.info("Processing load_chats request, count={d}", .{req.count});
+                    var chats = getChats(ctx.client, ctx.alloc, @intCast(req.count)) catch |err| {
+                        std.log.err("Failed to load chats: {any}", .{err});
+                        continue;
+                    };
+
+                    // Serialize chats data using std.json.fmt
+                    const chats_json = std.fmt.allocPrint(ctx.alloc, "{f}", .{std.json.fmt(chats.items, .{})}) catch continue;
+                    const data_copy = chats_json;
+
+                    ctx.loop.postEvent(.{
+                        .telegram_update = .{
+                            .kind = .chats_loaded,
+                            .chat_id = 0,
+                            .data = data_copy,
+                        },
+                    });
+
+                    // Cleanup
+                    for (chats.items) |*chat| {
+                        chat.deinit(ctx.alloc);
+                    }
+                    chats.deinit(ctx.alloc);
+                },
+                .load_chat_history => |req| {
+                    std.log.info("Processing load_chat_history request, chat_id={d}, limit={d}", .{req.chat_id, req.limit});
+                    var messages = getChatHistory(ctx.client, ctx.alloc, req.chat_id, @intCast(req.limit)) catch |err| {
+                        std.log.err("Failed to load chat history: {any}", .{err});
+                        continue;
+                    };
+
+                    // Serialize messages data using std.json.fmt
+                    const messages_json = std.fmt.allocPrint(ctx.alloc, "{f}", .{std.json.fmt(messages.items, .{})}) catch continue;
+                    const data_copy = messages_json;
+
+                    ctx.loop.postEvent(.{
+                        .telegram_update = .{
+                            .kind = .chat_history_loaded,
+                            .chat_id = req.chat_id,
+                            .data = data_copy,
+                        },
+                    });
+
+                    // Cleanup
+                    for (messages.items) |*msg| {
+                        msg.deinit(ctx.alloc);
+                    }
+                    messages.deinit(ctx.alloc);
+                },
+                .send_message => |req| {
+                    std.log.info("Processing send_message request, chat_id={d}", .{req.chat_id});
+                    sendMessage(ctx.client, ctx.alloc, req.chat_id, req.text) catch |err| {
+                        std.log.err("Failed to send message: {any}", .{err});
+                    };
+                    ctx.alloc.free(req.text);
+                },
+                .shutdown => {
+                    std.log.info("Telegram thread shutting down", .{});
+
+                    // Notify main thread that we're shutting down
+                    const shutdown_msg = ctx.alloc.dupe(u8, "shutdown") catch return;
+                    ctx.loop.postEvent(.{
+                        .telegram_update = .{
+                            .kind = .thread_shutdown,
+                            .chat_id = 0,
+                            .data = shutdown_msg,
+                        },
+                    });
+
+                    return;
+                },
+            }
+        }
+
+        // Check for TDLib updates with short timeout
+        const response = ctx.client.receive(0.1) orelse continue;
+
+        const parsed = std.json.parseFromSlice(
+            std.json.Value,
+            ctx.alloc,
+            response,
+            .{},
+        ) catch continue;
+        defer parsed.deinit();
+
+        const value = parsed.value;
+        const update_type = value.object.get("@type") orelse continue;
+
+        // Determine update kind and extract relevant data
+        var kind: TelegramUpdateKind = .unknown;
+        var chat_id: i64 = 0;
+
+        if (std.mem.eql(u8, update_type.string, "updateNewMessage")) {
+            kind = .new_message;
+            if (value.object.get("message")) |msg_obj| {
+                if (msg_obj.object.get("chat_id")) |cid| {
+                    chat_id = cid.integer;
+                }
+            }
+        } else if (std.mem.eql(u8, update_type.string, "updateMessageEdited")) {
+            kind = .message_edited;
+            if (value.object.get("chat_id")) |cid| {
+                chat_id = cid.integer;
+            }
+        } else if (std.mem.eql(u8, update_type.string, "updateDeleteMessages")) {
+            kind = .message_deleted;
+            if (value.object.get("chat_id")) |cid| {
+                chat_id = cid.integer;
+            }
+        } else if (std.mem.eql(u8, update_type.string, "updateChatTitle") or
+                   std.mem.eql(u8, update_type.string, "updateChatPhoto")) {
+            kind = .chat_updated;
+            if (value.object.get("chat_id")) |cid| {
+                chat_id = cid.integer;
+            }
+        }
+
+        // Only post events for updates we care about
+        if (kind != .unknown) {
+            // Duplicate the response string so it persists after this function returns
+            const data_copy = ctx.alloc.dupe(u8, response) catch continue;
+
+            ctx.loop.postEvent(.{
+                .telegram_update = .{
+                    .kind = kind,
+                    .chat_id = chat_id,
+                    .data = data_copy,
+                },
+            });
+        }
+    }
 }
