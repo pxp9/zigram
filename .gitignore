@@ -8,3 +8,4 @@ tdlib.tar.gz
 tdlib-bin.zip
 
 zig-out
+.data/
