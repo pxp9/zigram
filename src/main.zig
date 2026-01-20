@@ -6,11 +6,11 @@ const tdlib = @import("tdlib.zig");
 const telegram = @import("telegram.zig");
 const keybindings = @import("keybindings.zig");
 const render = @import("render.zig");
+const ai = @import("ai.zig");
 
 const KeyAction = keybindings.KeyAction;
 const KeyBindings = keybindings.KeyBindings;
 
-// Global log file and log messages for UI
 var global_log_file: std.fs.File = undefined;
 var global_log_messages: ?*std.ArrayList([]const u8) = null;
 var global_allocator: ?std.mem.Allocator = null;
@@ -31,7 +31,6 @@ fn logToFile(
 
     const timestamp = std.time.timestamp();
 
-    // Direct write to file without buffering
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "[{d}] {s} {s}", .{ timestamp, level_txt, scope_txt }) catch return;
     global_log_file.writeAll(msg) catch return;
@@ -40,7 +39,6 @@ fn logToFile(
     global_log_file.writeAll(formatted) catch return;
     global_log_file.writeAll("\n") catch return;
 
-    // Also add to UI log messages if available
     if (global_log_messages) |log_msgs| {
         if (global_allocator) |alloc| {
             const full_msg = std.fmt.allocPrint(alloc, "{s}{s}", .{ msg, formatted }) catch return;
@@ -55,6 +53,7 @@ const Event = union(enum) {
     key_press: vaxis.Key,
     winsize: vaxis.Winsize,
     telegram_update: telegram.TelegramUpdate,
+    ai_update: ai.AiUpdate,
 };
 
 const InputMode = render.InputMode;
@@ -74,37 +73,35 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    // Set TDLib log verbosity to silent
     try tdlib.setLogVerbosityLevel(0);
 
-    // Create TDLib client
     const client = try tdlib.Client.create();
     defer client.destroy();
 
-    // Authenticate with Telegram
     var user = try auth.authenticate(client, alloc);
     defer user.deinit(alloc);
 
     std.Thread.sleep(1 * std.time.ns_per_s); // Give user time to see auth message
 
-    // Load keybindings from config file
     var kb = try keybindings.loadKeybindings(alloc);
     defer kb.deinit(alloc);
 
-    // Build keymap from keybindings
     var keymap = try keybindings.buildKeymap(alloc, kb);
     defer keymap.deinit();
 
-    // Initialize TTY with buffer
+    var ai_config = ai.loadConfig(alloc) catch |err| blk: {
+        std.log.warn("Failed to load AI config: {any}. AI assistant will be disabled.", .{err});
+        break :blk ai.Config{ .provider = .google_ai };
+    };
+    defer ai_config.deinit(alloc);
+
     var tty_buffer: [1024]u8 = undefined;
     var tty = try vaxis.Tty.init(&tty_buffer);
     defer tty.deinit();
 
-    // Initialize Vaxis
     var vx = try vaxis.init(alloc, .{});
     defer vx.deinit(alloc, tty.writer());
 
-    // Create event loop
     var loop: vaxis.Loop(Event) = .{
         .tty = &tty,
         .vaxis = &vx,
@@ -120,11 +117,7 @@ pub fn main() !void {
         }
         llm_messages.deinit(alloc);
     }
-    try llm_messages.append(alloc, try alloc.dupe(u8, "AI: Hello! How can I help you today?"));
-    try llm_messages.append(alloc, try alloc.dupe(u8, "You: Summarize chat"));
-    try llm_messages.append(alloc, try alloc.dupe(u8, "AI: Alice wants to meet for coffee at 3pm."));
 
-    // Open log file for std.log
     const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
     const log_dir = try std.fs.path.join(alloc, &[_][]const u8{ home, ".local", "share", "zigram" });
     defer alloc.free(log_dir);
@@ -138,7 +131,6 @@ pub fn main() !void {
     defer global_log_file.close();
     try global_log_file.seekFromEnd(0); // Append to end
 
-    // Log messages for display in UI
     var log_messages: std.ArrayList([]const u8) = .empty;
     defer {
         for (log_messages.items) |msg| {
@@ -147,18 +139,15 @@ pub fn main() !void {
         log_messages.deinit(alloc);
     }
 
-    // Set global pointers for logging to UI
     global_log_messages = &log_messages;
     global_allocator = alloc;
 
     std.log.info("Zigram started", .{});
     std.log.info("Log file: {s}", .{log_file_path});
 
-    // Initialize telegram request queue
     var telegram_queue = telegram.TelegramQueue.init(alloc);
     defer telegram_queue.deinit();
 
-    // Spawn telegram update thread early
     const tg_ctx = TelegramThreadContext{
         .client = client,
         .loop = &loop,
@@ -166,10 +155,11 @@ pub fn main() !void {
         .alloc = alloc,
     };
     const tg_thread = try std.Thread.spawn(.{}, telegram.telegramUpdateLoop, .{tg_ctx});
-    // Don't detach - we need to join it on shutdown
     defer tg_thread.join();
 
-    // Initialize empty chats list - will be filled by telegram thread
+    var ai_queue = ai.AiQueue.init(alloc);
+    defer ai_queue.deinit();
+
     var chats: std.ArrayList(telegram.Chat) = .empty;
     defer {
         for (chats.items) |*chat| {
@@ -178,13 +168,11 @@ pub fn main() !void {
         chats.deinit(alloc);
     }
 
-    // Request chats from telegram thread
     std.log.info("Requesting chats from Telegram...", .{});
     try telegram_queue.postRequest(.{ .load_chats = .{ .count = 20 } });
 
     var selected_chat_idx: usize = 0;
 
-    // Store messages for each chat in a HashMap
     var chat_messages_cache = std.AutoHashMap(i64, std.ArrayList(telegram.Message)).init(alloc);
     defer {
         var iter = chat_messages_cache.iterator();
@@ -197,15 +185,34 @@ pub fn main() !void {
         chat_messages_cache.deinit();
     }
     var loading_messages: bool = false;
+    var llm_loading: bool = false;
 
-    var chat_input_buf: [2048]u8 = [_]u8{0} ** 2048;
-    var chat_input_len: usize = 0;
-    var llm_input_buf: [256]u8 = [_]u8{0} ** 256;
-    var llm_input_len: usize = 0;
     var active_mode: InputMode = .chat;
     var right_panel_mode: RightPanelMode = .llm;
 
-    // Main event loop
+    var chat_text_view: vaxis.widgets.TextView = .{};
+    var chat_text_buffer: vaxis.widgets.TextView.Buffer = .{};
+    defer chat_text_buffer.deinit(alloc);
+
+    var llm_text_view: vaxis.widgets.TextView = .{};
+    var llm_text_buffer: vaxis.widgets.TextView.Buffer = .{};
+    defer llm_text_buffer.deinit(alloc);
+
+    var chat_input = vaxis.widgets.TextInput.init(alloc);
+    defer chat_input.deinit();
+
+    var llm_input = vaxis.widgets.TextInput.init(alloc);
+    defer llm_input.deinit();
+
+    const ai_ctx = ai.AiThreadContext(Event){
+        .config = &ai_config,
+        .loop = &loop,
+        .request_queue = &ai_queue,
+        .alloc = alloc,
+    };
+    const ai_thread = try std.Thread.spawn(.{}, ai.aiAgentLoop, .{ai_ctx});
+    defer ai_thread.join();
+
     while (true) {
         const event = loop.nextEvent();
 
@@ -219,174 +226,33 @@ pub fn main() !void {
             .loading_messages = &loading_messages,
             .active_mode = &active_mode,
             .right_panel_mode = &right_panel_mode,
-            .chat_input_buf = &chat_input_buf,
-            .chat_input_len = &chat_input_len,
-            .llm_input_buf = llm_input_buf[0..],
-            .llm_input_len = &llm_input_len,
             .llm_messages = &llm_messages,
+            .llm_loading = &llm_loading,
             .log_messages = &log_messages,
             .keybindings = &kb,
             .keymap = &keymap,
             .telegram_queue = &telegram_queue,
+            .ai_queue = &ai_queue,
+            .chat_text_view = &chat_text_view,
+            .chat_text_buffer = &chat_text_buffer,
+            .chat_input = &chat_input,
+            .llm_text_view = &llm_text_view,
+            .llm_text_buffer = &llm_text_buffer,
+            .llm_input = &llm_input,
+            .ai_config = &ai_config,
         };
 
         const status = try handle_event(alloc, event, &state);
 
         if (status == 0) break;
 
-        // Render after handling event
         try render.render(alloc, &state);
     }
 }
 
 fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
     switch (event) {
-        .key_press => |key| {
-            const action = keybindings.getKeyAction(state.keymap, key);
-
-            // Check if this is a navigation action but we're not in chat_list mode
-            const is_nav_action = action == .navigate_up or action == .navigate_down;
-            const should_handle_as_text = is_nav_action and state.active_mode.* != .chat_list;
-
-            if (should_handle_as_text) {
-                // Treat navigation keys as regular text input when not in chat_list mode
-                if (key.codepoint != 0 and key.codepoint < 128) {
-                    const char: u8 = @intCast(key.codepoint);
-                    if (state.active_mode.* == .chat and state.chat_input_len.* < state.chat_input_buf.len) {
-                        state.chat_input_buf[state.chat_input_len.*] = char;
-                        state.chat_input_len.* += 1;
-                    } else if (state.active_mode.* == .llm and state.llm_input_len.* < state.llm_input_buf.len) {
-                        state.llm_input_buf[state.llm_input_len.*] = char;
-                        state.llm_input_len.* += 1;
-                    }
-                }
-            } else {
-                switch (action) {
-                    .quit => {
-                        // Request telegram thread to shutdown
-                        std.log.info("Quit requested, shutting down telegram thread", .{});
-                        state.telegram_queue.postRequest(.{ .shutdown = {} }) catch {};
-                        return 0;
-                    },
-                    .switch_mode => {
-                        // Cycle through modes: chat -> llm -> chat_list -> chat
-                        state.active_mode.* = switch (state.active_mode.*) {
-                            .chat => .llm,
-                            .llm => .chat_list,
-                            .chat_list => .chat,
-                        };
-                    },
-                    .navigate_up => {
-                        if (state.active_mode.* == .chat_list) {
-                            state.selected_chat_idx.* = (state.selected_chat_idx.* + state.chats.items.len - 1) % state.chats.items.len;
-                        }
-                    },
-                    .navigate_down => {
-                        if (state.active_mode.* == .chat_list) {
-                            state.selected_chat_idx.* = (state.selected_chat_idx.* + 1) % state.chats.items.len;
-                        }
-                    },
-                    .select => {
-                        if (state.active_mode.* == .chat_list and state.chats.items.len > 0) {
-                            const selected_chat = state.chats.items[state.selected_chat_idx.*];
-
-                            // Check if messages are already cached
-                            if (!state.chat_messages_cache.contains(selected_chat.id)) {
-                                std.log.info("Requesting messages for chat: {s}", .{selected_chat.title});
-
-                                // Set loading state
-                                state.loading_messages.* = true;
-
-                                // Request messages from telegram thread
-                                try state.telegram_queue.postRequest(.{
-                                    .load_chat_history = .{
-                                        .chat_id = selected_chat.id,
-                                        .limit = 10,
-                                    },
-                                });
-                            }
-
-                            // Clear input buffer when switching chats
-                            state.chat_input_len.* = 0;
-
-                            // Switch back to chat mode after selecting
-                            state.active_mode.* = .chat;
-                        } else if (state.active_mode.* == .chat and state.chat_input_len.* > 0) {
-                            // Send chat message via Telegram
-                            const selected_chat = state.chats.items[state.selected_chat_idx.*];
-                            const message_text = try alloc.dupe(u8, state.chat_input_buf[0..state.chat_input_len.*]);
-                            std.log.info("Sending message to chat {d}", .{selected_chat.id});
-
-                            // Request send from telegram thread
-                            try state.telegram_queue.postRequest(.{
-                                .send_message = .{
-                                    .chat_id = selected_chat.id,
-                                    .text = message_text,
-                                },
-                            });
-
-                            state.chat_input_len.* = 0;
-                        } else if (state.active_mode.* == .llm and state.llm_input_len.* > 0) {
-                            // Send LLM message
-                            const msg = try std.fmt.allocPrint(alloc, "You: {s}", .{state.llm_input_buf[0..state.llm_input_len.*]});
-                            try state.llm_messages.append(alloc, msg);
-                            state.llm_input_len.* = 0;
-                        }
-                    },
-                    .delete_char => {
-                        if (state.active_mode.* == .chat and state.chat_input_len.* > 0) {
-                            state.chat_input_len.* -= 1;
-                        } else if (state.active_mode.* == .llm and state.llm_input_len.* > 0) {
-                            state.llm_input_len.* -= 1;
-                        }
-                    },
-                    .reload_config => {
-                        // Reload keybindings from config file
-                        // First try to load new keybindings
-                        var new_keybindings = keybindings.loadKeybindings(alloc) catch |err| {
-                            std.log.err("Failed to reload config: {any}", .{err});
-                            return 1;
-                        };
-
-                        // Build new keymap with new keybindings
-                        const new_keymap = keybindings.buildKeymap(alloc, new_keybindings) catch |err| {
-                            std.log.err("Failed to build keymap: {any}", .{err});
-                            new_keybindings.deinit(alloc);
-                            return 1;
-                        };
-
-                        // Success - now replace old with new
-                        state.keybindings.*.deinit(alloc);
-                        state.keymap.*.deinit();
-                        state.keybindings.* = new_keybindings;
-                        state.keymap.* = new_keymap;
-
-                        std.log.info("Config reloaded", .{});
-                    },
-                    .toggle_right_panel => {
-                        state.right_panel_mode.* = switch (state.right_panel_mode.*) {
-                            .llm => .logs,
-                            .logs => .llm,
-                        };
-                        std.log.info("Toggled right panel to {s}", .{@tagName(state.right_panel_mode.*)});
-                    },
-                    .send_message, .none => {
-                        // Handle text input for unbound keys
-                        if (key.codepoint != 0 and key.codepoint < 128) {
-                            const char: u8 = @intCast(key.codepoint);
-                            if (state.active_mode.* == .chat and state.chat_input_len.* < state.chat_input_buf.len) {
-                                state.chat_input_buf[state.chat_input_len.*] = char;
-                                state.chat_input_len.* += 1;
-                            } else if (state.active_mode.* == .llm and state.llm_input_len.* < state.llm_input_buf.len) {
-                                state.llm_input_buf[state.llm_input_len.*] = char;
-                                state.llm_input_len.* += 1;
-                            }
-                        }
-                    },
-                }
-            }
-            // Post render event after key press
-        },
+        .key_press => |key| return try handle_key_press(alloc, state, key),
         .winsize => |ws| {
             try state.vx.resize(alloc, state.tty.writer(), ws);
         },
@@ -395,7 +261,6 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
 
             switch (update.kind) {
                 .chats_loaded => {
-                    // Parse chats JSON and populate chats list
                     const parsed = std.json.parseFromSlice(
                         std.json.Value,
                         alloc,
@@ -407,13 +272,11 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                     };
                     defer parsed.deinit();
 
-                    // Clear existing chats
                     for (state.chats.items) |*chat| {
                         chat.deinit(alloc);
                     }
                     state.chats.clearRetainingCapacity();
 
-                    // Parse JSON array of chats
                     if (parsed.value != .array) {
                         std.log.err("Expected chats JSON to be an array", .{});
                         return 1;
@@ -440,7 +303,6 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
 
                     std.log.info("Loaded {d} chats into UI", .{state.chats.items.len});
 
-                    // Auto-load first chat messages
                     if (state.chats.items.len > 0) {
                         const first_chat = state.chats.items[0];
                         try state.telegram_queue.postRequest(.{
@@ -452,7 +314,6 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                     }
                 },
                 .chat_history_loaded => {
-                    // Parse messages JSON and add to cache
                     const parsed = std.json.parseFromSlice(
                         std.json.Value,
                         alloc,
@@ -466,7 +327,6 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
 
                     state.loading_messages.* = false;
 
-                    // Parse JSON array of messages
                     if (parsed.value != .array) {
                         std.log.err("Expected messages JSON to be an array", .{});
                         return 1;
@@ -502,7 +362,6 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                     std.log.info("Loaded {d} messages for chat {d}", .{ messages.items.len, update.chat_id });
                 },
                 .new_message => {
-                    // Parse the JSON data
                     const parsed = std.json.parseFromSlice(
                         std.json.Value,
                         alloc,
@@ -513,15 +372,26 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
 
                     const value = parsed.value;
                     if (value.object.get("message")) |msg_obj| {
-                        // Only process if we have this chat cached
                         if (state.chat_messages_cache.getPtr(update.chat_id)) |cached_messages| {
                             const msg_id = msg_obj.object.get("id") orelse return 1;
                             const is_outgoing = msg_obj.object.get("is_outgoing") orelse return 1;
 
-                            // Get sender name (simplified - TODO: get actual username from cache)
-                            const sender_name: []const u8 = if (is_outgoing.bool) "You" else "Unknown";
+                            var sender_name: []const u8 = if (is_outgoing.bool) "You" else "Unknown";
 
-                            // Get message content
+                            if (!is_outgoing.bool) {
+                                if (msg_obj.object.get("sender_id")) |sender_id_obj| {
+                                    if (sender_id_obj.object.get("@type")) |type_val| {
+                                        if (std.mem.eql(u8, type_val.string, "messageSenderUser")) {
+                                            const selected_chat = state.chats.items[state.selected_chat_idx.*];
+                                            sender_name = selected_chat.title;
+                                        } else if (std.mem.eql(u8, type_val.string, "messageSenderChat")) {
+                                            const selected_chat = state.chats.items[state.selected_chat_idx.*];
+                                            sender_name = selected_chat.title;
+                                        }
+                                    }
+                                }
+                            }
+
                             var content: []const u8 = "";
                             if (msg_obj.object.get("content")) |msg_content| {
                                 if (msg_content.object.get("text")) |text_obj| {
@@ -533,7 +403,15 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                                 }
                             }
 
-                            // Add the new message to the cache
+                            const win_height = state.vx.window().height;
+                            const panel_height = if (win_height > 4) win_height - 2 else 2;
+                            const messages_height = if (panel_height > 6) panel_height - 8 else 1;
+                            const buffer_rows = state.chat_text_buffer.rows;
+                            const max_scroll = buffer_rows -| messages_height;
+                            const current_scroll = state.chat_text_view.scroll_view.scroll.y;
+                            const threshold: usize = 3;
+                            const is_at_bottom = (current_scroll +| threshold >= max_scroll) or buffer_rows <= messages_height;
+
                             cached_messages.append(alloc, telegram.Message{
                                 .id = msg_id.integer,
                                 .sender_name = try alloc.dupe(u8, sender_name),
@@ -541,12 +419,16 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                                 .is_outgoing = is_outgoing.bool,
                             }) catch return 1;
 
+                            if (is_at_bottom) {
+                                const message_lines = 1 + std.mem.count(u8, content, "\n");
+                                state.chat_text_view.scroll_view.scroll.y +|= message_lines;
+                            }
+
                             std.log.info("Added new message to chat {d}: {s}", .{ update.chat_id, content });
                         }
                     }
                 },
                 .message_edited, .message_deleted, .chat_updated => {
-                    // TODO: Handle other update types
                     std.log.info("Received {s} update for chat {d}", .{ @tagName(update.kind), update.chat_id });
                 },
                 .thread_shutdown => {
@@ -555,7 +437,282 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                 .unknown => {},
             }
         },
+        .ai_update => |update| {
+            defer alloc.free(update.data);
+
+            switch (update.kind) {
+                .message_chunk => {
+                    const win_height = state.vx.window().height;
+                    const panel_height = if (win_height > 4) win_height - 2 else 2;
+                    const messages_height = if (panel_height > 6) panel_height - 8 else 1;
+                    const buffer_rows = state.llm_text_buffer.rows;
+                    const max_scroll = buffer_rows -| messages_height;
+                    const current_scroll = state.llm_text_view.scroll_view.scroll.y;
+                    const threshold: usize = 3;
+                    const is_at_bottom = (current_scroll +| threshold >= max_scroll) or buffer_rows <= messages_height;
+
+                    // Check if this is the first chunk (need to create initial message)
+                    const is_first_chunk = state.llm_messages.items.len == 0 or
+                        (state.llm_messages.items.len > 0 and
+                        !std.mem.startsWith(u8, state.llm_messages.items[state.llm_messages.items.len - 1], "AI:"));
+
+                    if (is_first_chunk) {
+                        const initial_msg = try std.fmt.allocPrint(alloc, "AI: {s}", .{update.data});
+                        try state.llm_messages.append(alloc, initial_msg);
+                    } else {
+                        const last_idx = state.llm_messages.items.len - 1;
+                        const old_msg = state.llm_messages.items[last_idx];
+                        const new_msg = try std.fmt.allocPrint(alloc, "{s}{s}", .{ old_msg, update.data });
+                        alloc.free(old_msg);
+                        state.llm_messages.items[last_idx] = new_msg;
+                    }
+
+                    if (is_at_bottom) {
+                        const chunk_lines = 1 + std.mem.count(u8, update.data, "\n");
+                        state.llm_text_view.scroll_view.scroll.y +|= chunk_lines;
+                    }
+
+                    std.log.info("AI chunk received", .{});
+                },
+                .message_completed => {
+                    state.llm_loading.* = false;
+                    std.log.info("AI message completed", .{});
+                },
+                .error_occurred => {
+                    state.llm_loading.* = false;
+                    const error_msg = try std.fmt.allocPrint(alloc, "AI: {s}", .{update.data});
+                    try state.llm_messages.append(alloc, error_msg);
+                    std.log.err("AI error: {s}", .{update.data});
+                },
+                .tool_call => {
+                    if (update.tool_call) |tool| {
+                        defer {
+                            alloc.free(tool.tool_name);
+                            alloc.free(tool.chat_name);
+                            alloc.free(tool.message_text);
+                        }
+
+                        std.log.info("AI requested tool call: {s} for chat '{s}'", .{ tool.tool_name, tool.chat_name });
+
+                        const tool_msg = try std.fmt.allocPrint(alloc, "AI: [Sending message to '{s}'...]", .{tool.chat_name});
+                        try state.llm_messages.append(alloc, tool_msg);
+
+                        // Find chat by name
+                        var found_chat_id: ?i64 = null;
+                        for (state.chats.items) |chat| {
+                            if (std.mem.eql(u8, chat.title, tool.chat_name)) {
+                                found_chat_id = chat.id;
+                                break;
+                            }
+                        }
+
+                        if (found_chat_id) |chat_id| {
+                            // Send message via Telegram
+                            const msg_copy = try alloc.dupe(u8, tool.message_text);
+                            try state.telegram_queue.postRequest(.{
+                                .send_message = .{
+                                    .chat_id = chat_id,
+                                    .text = msg_copy,
+                                },
+                            });
+
+                            // Report success back to AI
+                            const success_msg = try std.fmt.allocPrint(alloc, "Message sent successfully to chat '{s}'", .{tool.chat_name});
+                            try state.ai_queue.postRequest(.{
+                                .tool_result = .{
+                                    .success = true,
+                                    .message = success_msg,
+                                },
+                            });
+                        } else {
+                            // Chat not found
+                            const error_msg = try std.fmt.allocPrint(alloc, "Chat '{s}' not found in your conversations", .{tool.chat_name});
+                            try state.ai_queue.postRequest(.{
+                                .tool_result = .{
+                                    .success = false,
+                                    .message = error_msg,
+                                },
+                            });
+                        }
+                    }
+                },
+            }
+        },
     }
 
     return 1;
+}
+
+fn handle_scroll_input(state: *AppState, key: vaxis.Key) bool {
+    const is_scroll_key = key.codepoint == vaxis.Key.up or key.codepoint == vaxis.Key.down;
+    const can_scroll_chat = state.active_mode.* == .chat and state.chat_input.buf.realLength() == 0 and is_scroll_key;
+    const can_scroll_llm = state.active_mode.* == .llm and state.llm_input.buf.realLength() == 0 and is_scroll_key;
+
+    if (can_scroll_chat) {
+        state.chat_text_view.input(key);
+        return true;
+    }
+
+    if (can_scroll_llm) {
+        state.llm_text_view.input(key);
+        return true;
+    }
+
+    return false;
+}
+
+fn handle_text_input(state: *AppState, key: vaxis.Key, action: keybindings.KeyAction) bool {
+    const should_handle = switch (action) {
+        .none => true,
+        .delete_char => state.active_mode.* == .chat or state.active_mode.* == .llm,
+        .navigate_up, .navigate_down => state.active_mode.* != .chat_list and
+            (state.active_mode.* != .chat or state.chat_input.buf.realLength() > 0),
+        else => false,
+    };
+
+    if (should_handle) {
+        switch (state.active_mode.*) {
+            .chat => state.chat_input.update(.{ .key_press = key }) catch {},
+            .llm => state.llm_input.update(.{ .key_press = key }) catch {},
+            .chat_list => {},
+        }
+    }
+
+    return should_handle;
+}
+
+fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
+    switch (state.active_mode.*) {
+        .chat_list => {
+            if (state.chats.items.len == 0) return;
+            const selected_chat = state.chats.items[state.selected_chat_idx.*];
+            if (!state.chat_messages_cache.contains(selected_chat.id)) {
+                std.log.info("Requesting messages for chat: {s}", .{selected_chat.title});
+                state.loading_messages.* = true;
+                try state.telegram_queue.postRequest(.{
+                    .load_chat_history = .{ .chat_id = selected_chat.id, .limit = 10 },
+                });
+            }
+            state.chat_input.reset();
+            state.active_mode.* = .chat;
+        },
+        .chat => {
+            if (state.chat_input.buf.realLength() == 0) return;
+            const selected_chat = state.chats.items[state.selected_chat_idx.*];
+            const message_text = try state.chat_input.toOwnedSlice();
+            std.log.info("Sending message to chat {d}", .{selected_chat.id});
+            try state.telegram_queue.postRequest(.{
+                .send_message = .{ .chat_id = selected_chat.id, .text = message_text },
+            });
+        },
+        .llm => {
+            if (state.llm_input.buf.realLength() == 0) return;
+            const input_text = try state.llm_input.toOwnedSlice();
+            const user_msg = try std.fmt.allocPrint(alloc, "You: {s}", .{input_text});
+            try state.llm_messages.append(alloc, user_msg);
+
+            if (state.ai_config.google_ai == null) {
+                const error_msg = try alloc.dupe(u8, "AI: Error - No API key configured");
+                try state.llm_messages.append(alloc, error_msg);
+                alloc.free(input_text);
+                return;
+            }
+
+            // Build chat list context
+            var chat_list: std.ArrayList(u8) = .empty;
+            defer chat_list.deinit(alloc);
+
+            try chat_list.appendSlice(alloc, "Available chats: ");
+            for (state.chats.items, 0..) |chat, i| {
+                if (i > 0) try chat_list.appendSlice(alloc, ", ");
+                try chat_list.appendSlice(alloc, "\"");
+                try chat_list.appendSlice(alloc, chat.title);
+                try chat_list.appendSlice(alloc, "\"");
+            }
+            try chat_list.appendSlice(alloc, "\n\n");
+            try chat_list.appendSlice(alloc, input_text);
+
+            const enhanced_prompt = try chat_list.toOwnedSlice(alloc);
+
+            state.llm_loading.* = true;
+            try state.ai_queue.postRequest(.{ .send_message = .{ .prompt = enhanced_prompt } });
+        },
+    }
+}
+
+fn handle_reload_config(alloc: std.mem.Allocator, state: *AppState) !void {
+    var new_keybindings = keybindings.loadKeybindings(alloc) catch |err| {
+        std.log.err("Failed to reload keybindings: {any}", .{err});
+        return err;
+    };
+
+    var new_keymap = keybindings.buildKeymap(alloc, new_keybindings) catch |err| {
+        std.log.err("Failed to build keymap: {any}", .{err});
+        new_keybindings.deinit(alloc);
+        return err;
+    };
+
+    const new_ai_config = ai.loadConfig(alloc) catch |err| {
+        std.log.err("Failed to reload AI config: {any}", .{err});
+        new_keybindings.deinit(alloc);
+        new_keymap.deinit();
+        return err;
+    };
+
+    state.keybindings.*.deinit(alloc);
+    state.keymap.*.deinit();
+    state.ai_config.*.deinit(alloc);
+
+    state.keybindings.* = new_keybindings;
+    state.keymap.* = new_keymap;
+    state.ai_config.* = new_ai_config;
+
+    std.log.info("Config reloaded (keybindings and AI settings)", .{});
+}
+
+fn handle_key_action(alloc: std.mem.Allocator, state: *AppState, action: keybindings.KeyAction) !i32 {
+    switch (action) {
+        .quit => {
+            std.log.info("Quit requested, shutting down threads", .{});
+            state.telegram_queue.postRequest(.{ .shutdown = {} }) catch {};
+            state.ai_queue.postRequest(.{ .shutdown = {} }) catch {};
+            return 0;
+        },
+        .switch_mode => state.active_mode.* = switch (state.active_mode.*) {
+            .chat => .llm,
+            .llm => .chat_list,
+            .chat_list => .chat,
+        },
+        .navigate_up => {
+            if (state.active_mode.* == .chat_list) {
+                state.selected_chat_idx.* = (state.selected_chat_idx.* + state.chats.items.len - 1) % state.chats.items.len;
+            }
+        },
+        .navigate_down => {
+            if (state.active_mode.* == .chat_list) {
+                state.selected_chat_idx.* = (state.selected_chat_idx.* + 1) % state.chats.items.len;
+            }
+        },
+        .select => try handle_select_action(alloc, state),
+        .reload_config => try handle_reload_config(alloc, state),
+        .toggle_right_panel => {
+            state.right_panel_mode.* = switch (state.right_panel_mode.*) {
+                .llm => .logs,
+                .logs => .llm,
+            };
+            std.log.info("Toggled right panel to {s}", .{@tagName(state.right_panel_mode.*)});
+        },
+        .delete_char, .send_message, .none => {},
+    }
+    return 1;
+}
+
+fn handle_key_press(alloc: std.mem.Allocator, state: *AppState, key: vaxis.Key) !i32 {
+    if (handle_scroll_input(state, key)) return 1;
+
+    const action = keybindings.getKeyAction(state.keymap, key);
+
+    if (handle_text_input(state, key, action)) return 1;
+
+    return try handle_key_action(alloc, state, action);
 }

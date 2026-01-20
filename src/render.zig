@@ -3,8 +3,69 @@ const vaxis = @import("vaxis");
 const auth = @import("auth.zig");
 const telegram = @import("telegram.zig");
 const keybindings = @import("keybindings.zig");
+const ai = @import("ai.zig");
+
+const TextView = vaxis.widgets.TextView;
+const TextViewBuffer = TextView.Buffer;
+const TextInput = vaxis.widgets.TextInput;
 
 pub const MAX_MESSAGE_LENGTH = 2048;
+
+fn wrapText(alloc: std.mem.Allocator, text: []const u8, width: usize) ![]const u8 {
+    if (width == 0) return try alloc.dupe(u8, text);
+
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(alloc);
+
+    var line_start: usize = 0;
+    var last_space: ?usize = null;
+    var col: usize = 0;
+
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+
+        if (c == '\n') {
+            try result.appendSlice(alloc, text[line_start..i + 1]);
+            line_start = i + 1;
+            col = 0;
+            last_space = null;
+            continue;
+        }
+
+        if (c == ' ' or c == '\t') {
+            last_space = i;
+        }
+
+        col += 1;
+
+        if (col >= width) {
+            if (last_space) |space_pos| {
+                if (space_pos > line_start) {
+                    try result.appendSlice(alloc, text[line_start..space_pos]);
+                    try result.append(alloc, '\n');
+                    line_start = space_pos + 1;
+                    i = space_pos;
+                    col = 0;
+                    last_space = null;
+                    continue;
+                }
+            }
+
+            try result.appendSlice(alloc, text[line_start..i]);
+            try result.append(alloc, '\n');
+            line_start = i;
+            col = 0;
+            last_space = null;
+        }
+    }
+
+    if (line_start < text.len) {
+        try result.appendSlice(alloc, text[line_start..]);
+    }
+
+    return try result.toOwnedSlice(alloc);
+}
 
 pub const InputMode = enum {
     chat,
@@ -27,32 +88,33 @@ pub const AppState = struct {
     loading_messages: *bool,
     active_mode: *InputMode,
     right_panel_mode: *RightPanelMode,
-    chat_input_buf: *[MAX_MESSAGE_LENGTH]u8,
-    chat_input_len: *usize,
-    llm_input_buf: []u8,
-    llm_input_len: *usize,
     llm_messages: *std.ArrayList([]const u8),
+    llm_loading: *bool,
     log_messages: *std.ArrayList([]const u8),
     keybindings: *keybindings.KeyBindings,
     keymap: *std.AutoHashMap(u64, keybindings.KeyAction),
     telegram_queue: *telegram.TelegramQueue,
+    ai_queue: *ai.AiQueue,
+    chat_text_view: *TextView,
+    chat_text_buffer: *TextViewBuffer,
+    chat_input: *TextInput,
+    llm_text_view: *TextView,
+    llm_text_buffer: *TextViewBuffer,
+    llm_input: *TextInput,
+    ai_config: *ai.Config,
 };
 
 pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
-    // Create arena allocator for this render cycle
     var render_arena = std.heap.ArenaAllocator.init(alloc);
     defer render_arena.deinit();
     const render_alloc = render_arena.allocator();
 
-    // Get the root window (this is automatically full screen)
     const win = state.vx.window();
     win.clear();
 
-    // Get window dimensions
     const width = win.width;
     const height = win.height;
 
-    // Draw title bar with user info
     var title_buf: [256]u8 = undefined;
     const user_display = if (state.user.username) |username|
         try std.fmt.bufPrint(&title_buf, "Zigram - Logged as: {s} (@{s})", .{ state.user.first_name, username })
@@ -73,7 +135,6 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
     };
     _ = title_win.printSegment(title_segment, .{});
 
-    // Calculate panel dimensions (leave 2 rows for title and status bar)
     const panel_height = if (height > 4) height - 2 else 2; // Minimum height of 2 for at least border
     const min_chat_list_width = 20; // Minimum width for chat list
     const chat_list_width = @max(width / 4, min_chat_list_width); // 25% for chat list, minimum 20
@@ -83,7 +144,6 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
     else
         0; // Remaining for LLM chat
 
-    // Panel 1: Chat List (left side - 25%)
     const chat_list_panel = win.child(.{
         .x_off = 0,
         .y_off = 1,
@@ -108,7 +168,6 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
         .style = chat_list_border_style,
     }, .{});
 
-    // Clear the content area of chat list panel to prevent artifacts
     const chat_list_content = chat_list_panel.child(.{
         .x_off = 1,
         .y_off = 2,
@@ -117,7 +176,6 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
     });
     chat_list_content.fill(.{ .char = .{ .grapheme = " " } });
 
-    // Display chat list with selection or "No chats" message
     if (state.chats.items.len == 0) {
         const no_chats_win = chat_list_panel.child(.{
             .x_off = 2,
@@ -128,13 +186,11 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
             .style = .{ .fg = .{ .index = 8 } }, // Gray
         }, .{});
     } else {
-        // Using while loop with index since inline for doesn't work with runtime arrays
         var idx: usize = 0;
         while (idx < state.chats.items.len) : (idx += 1) {
             const chat = state.chats.items[idx];
             const item_y = 3 + idx;
 
-            // Only render if item is within the panel bounds
             if (item_y < panel_height - 1) {
                 const is_selected = idx == state.selected_chat_idx.*;
                 const chat_style: vaxis.Style = if (is_selected)
@@ -142,7 +198,6 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
                 else
                     .{};
 
-                // Render prefix separately
                 const prefix_win = chat_list_panel.child(.{
                     .x_off = 2,
                     .y_off = @intCast(item_y),
@@ -153,16 +208,13 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
                     .style = chat_style,
                 }, .{});
 
-                // Calculate max width for chat name (panel width - borders - prefix - padding)
                 const max_name_width = if (chat_list_width > 6) chat_list_width - 6 else 1;
 
-                // Truncate chat name if it's too long
                 const truncated_chat = if (chat.title.len > max_name_width)
                     chat.title[0..max_name_width]
                 else
                     chat.title;
 
-                // Render chat name after prefix
                 const chat_item = chat_list_panel.child(.{
                     .x_off = 4, // 2 (padding) + 2 (prefix width)
                     .y_off = @intCast(item_y),
@@ -175,7 +227,6 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
         }
     }
 
-    // Panel 2: Main Chat (center - 50%)
     const chat_panel = win.child(.{
         .x_off = @intCast(chat_list_width),
         .y_off = 1,
@@ -187,7 +238,7 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
         },
     });
 
-    const chat_title = chat_panel.child(.{
+    const chat_title_win = chat_panel.child(.{
         .x_off = 2,
         .y_off = 1,
     });
@@ -196,110 +247,96 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
         var chat_title_buf: [128]u8 = undefined;
         const current_chat_name = state.chats.items[state.selected_chat_idx.*].title;
         const chat_title_text = try std.fmt.bufPrint(&chat_title_buf, "Chat: {s}", .{current_chat_name});
-        _ = chat_title.printSegment(.{
+        _ = chat_title_win.printSegment(.{
             .text = chat_title_text,
             .style = .{ .bold = true, .fg = .{ .index = 2 } }, // Green
         }, .{});
     } else {
-        _ = chat_title.printSegment(.{
+        _ = chat_title_win.printSegment(.{
             .text = "No chat selected",
             .style = .{ .bold = true, .fg = .{ .index = 8 } }, // Gray
         }, .{});
     }
 
-    // Clear the content area of chat panel to prevent artifacts
-    const chat_content = chat_panel.child(.{
-        .x_off = 1,
-        .y_off = 2,
-        .width = if (chat_width > 2) chat_width - 2 else 1,
-        .height = if (panel_height > 3) panel_height - 3 else 1,
+    const messages_start_y: u16 = 3;
+    const messages_height = if (panel_height > 6) panel_height - 8 else 1;
+    const messages_window = chat_panel.child(.{
+        .x_off = 2,
+        .y_off = messages_start_y,
+        .width = if (chat_width > 4) chat_width - 4 else 1,
+        .height = messages_height,
     });
-    chat_content.fill(.{ .char = .{ .grapheme = " " } });
 
-    // Display chat messages (scrollable)
     if (state.loading_messages.*) {
-        // Show "Loading messages..." while waiting
-        const loading_item = chat_panel.child(.{
-            .x_off = 2,
-            .y_off = 3,
+        const loading_text = "Loading messages...";
+        try state.chat_text_buffer.append(alloc, .{ .bytes = loading_text });
+        try state.chat_text_buffer.updateStyle(alloc, .{
+            .begin = 0,
+            .end = loading_text.len,
+            .style = .{ .italic = true, .fg = .{ .index = 3 } },
         });
-        _ = loading_item.printSegment(.{
-            .text = "Loading messages...",
-            .style = .{ .fg = .{ .index = 3 }, .italic = true }, // Yellow, italic
-        }, .{});
     } else if (state.chats.items.len > 0) {
+        state.chat_text_buffer.clear(alloc);
         const selected_chat = state.chats.items[state.selected_chat_idx.*];
         const messages_opt = state.chat_messages_cache.get(selected_chat.id);
 
         if (messages_opt) |messages| {
             if (messages.items.len == 0) {
-                // Show "No messages"
-                const no_msg_item = chat_panel.child(.{
-                    .x_off = 2,
-                    .y_off = 3,
+                const no_msg_text = "No messages";
+                try state.chat_text_buffer.append(alloc, .{ .bytes = no_msg_text });
+                try state.chat_text_buffer.updateStyle(alloc, .{
+                    .begin = 0,
+                    .end = no_msg_text.len,
+                    .style = .{ .italic = true, .fg = .{ .index = 8 } },
                 });
-                _ = no_msg_item.printSegment(.{
-                    .text = "No messages",
-                    .style = .{ .fg = .{ .index = 8 } }, // Gray
-                }, .{});
             } else {
-                // Simple rendering with panel boundary cropping
-                var msg_y: usize = 3;
-                const max_y = panel_height - 3; // Leave space for input at bottom
-
+                state.chat_text_buffer.clear(alloc);
+                const chat_panel_width = if (chat_width > 8) chat_width - 8 else 1;
                 for (messages.items) |msg| {
-                    // Stop if we've reached the panel boundary
-                    if (msg_y >= max_y) break;
-
-                    // Simple one-line rendering
-                    const display_text = std.fmt.allocPrint(render_alloc, "{s}: {s}", .{ msg.sender_name, msg.content }) catch "[error]";
-
-                    const msg_item = chat_panel.child(.{
-                        .x_off = 2,
-                        .y_off = @intCast(msg_y),
-                    });
-                    _ = msg_item.printSegment(.{ .text = display_text }, .{});
-                    msg_y += 1;
+                    const msg_text = std.fmt.allocPrint(render_alloc, "{s}: {s}", .{ msg.sender_name, msg.content }) catch continue;
+                    const wrapped = wrapText(render_alloc, msg_text, chat_panel_width) catch continue;
+                    const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{wrapped}) catch continue;
+                    state.chat_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
                 }
             }
         } else {
-            // Messages not cached yet, show prompt
-            const not_loaded_item = chat_panel.child(.{
-                .x_off = 2,
-                .y_off = 3,
+            const prompt_text = "Press Enter to load messages";
+            try state.chat_text_buffer.append(alloc, .{ .bytes = prompt_text });
+            try state.chat_text_buffer.updateStyle(alloc, .{
+                .begin = 0,
+                .end = prompt_text.len,
+                .style = .{ .italic = true, .fg = .{ .index = 6 } },
             });
-            _ = not_loaded_item.printSegment(.{
-                .text = "Press Enter to load messages",
-                .style = .{ .fg = .{ .index = 8 } }, // Gray
-            }, .{});
         }
     }
 
-    // Chat input field
-    const chat_input_y = if (panel_height > 3) panel_height - 3 else 1;
-    const chat_input_label = chat_panel.child(.{
-        .x_off = 2,
-        .y_off = @intCast(chat_input_y),
-    });
-    const chat_prompt = if (state.active_mode.* == .chat) "> " else "  ";
-    _ = chat_input_label.printSegment(.{
-        .text = chat_prompt,
-        .style = .{ .bold = true, .fg = .{ .index = 2 } },
-    }, .{});
-    const chat_input_field = chat_panel.child(.{
-        .x_off = 4,
-        .y_off = @intCast(chat_input_y),
-    });
-    const input_style: vaxis.Style = if (state.active_mode.* == .chat)
-        .{ .fg = .{ .index = 7 }, .reverse = true }
-    else
-        .{ .fg = .{ .index = 8 } };
-    _ = chat_input_field.printSegment(.{
-        .text = state.chat_input_buf[0..state.chat_input_len.*],
-        .style = input_style,
-    }, .{});
+    state.chat_text_view.draw(messages_window, state.chat_text_buffer.*);
 
-    // Panel 3: LLM Chat (right side - remaining space)
+    const input_y = if (panel_height > 5) panel_height - 5 else 1;
+
+    const prompt_win = chat_panel.child(.{
+        .x_off = 2,
+        .y_off = input_y + 1,
+    });
+    const prompt_style = if (state.active_mode.* == .chat)
+        vaxis.Style{ .fg = .{ .index = 2 }, .bold = true } // Green, bold
+    else
+        vaxis.Style{ .fg = .{ .index = 8 } }; // Gray
+    _ = prompt_win.printSegment(.{ .text = "> ", .style = prompt_style }, .{});
+
+    const input_width = if (chat_width > 6) chat_width - 6 else 1;
+
+    const input_win = chat_panel.child(.{
+        .x_off = 4, // After "> "
+        .y_off = input_y,
+        .width = input_width,
+        .height = 3, // Explicit height for border + content
+        .border = .{
+            .where = .all,
+            .style = .{ .fg = .{ .index = 2 } },
+        },
+    });
+
     const llm_panel = win.child(.{
         .x_off = @intCast(chat_list_width + chat_width),
         .y_off = 1,
@@ -320,62 +357,76 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
         .style = .{ .bold = true, .fg = .{ .index = 5 } }, // Magenta
     }, .{});
 
-    // Display LLM messages or Logs based on mode
-    var llm_y: usize = 3;
+    const llm_messages_height = if (panel_height > 6) panel_height - 8 else 1;
+    const llm_messages_window = llm_panel.child(.{
+        .x_off = 2,
+        .y_off = 3,
+        .width = if (llm_chat_width > 4) llm_chat_width - 4 else 1,
+        .height = llm_messages_height,
+    });
+
+    state.llm_text_buffer.clear(alloc);
 
     if (state.right_panel_mode.* == .llm) {
+        var char_count: usize = 0;
+        const panel_width = if (llm_chat_width > 6) llm_chat_width - 6 else 1;
+
         for (state.llm_messages.items) |msg| {
-            const llm_item = llm_panel.child(.{
-                .x_off = 2,
-                .y_off = @intCast(llm_y),
+            const wrapped = wrapText(render_alloc, msg, panel_width) catch continue;
+            const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{wrapped}) catch continue;
+            char_count += display_text.len;
+            state.llm_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
+        }
+
+        if (state.llm_loading.*) {
+            const loading_text = "\nLoading...";
+            try state.llm_text_buffer.append(alloc, .{ .bytes = loading_text });
+            try state.llm_text_buffer.updateStyle(alloc, .{
+                .begin = char_count,
+                .end = char_count + loading_text.len,
+                .style = .{ .italic = true, .fg = .{ .index = 3 } },
             });
-            _ = llm_item.printSegment(.{ .text = msg }, .{});
-            llm_y += 1;
         }
     } else {
-        // Display logs without cropping
         for (state.log_messages.items) |msg| {
-            const log_item = llm_panel.child(.{
-                .x_off = 2,
-                .y_off = @intCast(llm_y),
-            });
-            _ = log_item.printSegment(.{ .text = msg }, .{});
-            llm_y += 1;
+            const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{msg}) catch continue;
+            state.llm_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
         }
     }
 
-    // LLM input field
-    const llm_input_y = if (panel_height > 3) panel_height - 3 else 1;
-    const llm_input_label = llm_panel.child(.{
-        .x_off = 2,
-        .y_off = @intCast(llm_input_y),
-    });
-    const llm_prompt = if (state.active_mode.* == .llm) "> " else "  ";
-    _ = llm_input_label.printSegment(.{
-        .text = llm_prompt,
-        .style = .{ .bold = true, .fg = .{ .index = 5 } },
-    }, .{});
-    const llm_input_field = llm_panel.child(.{
-        .x_off = 4,
-        .y_off = @intCast(llm_input_y),
-    });
-    const llm_input_style: vaxis.Style = if (state.active_mode.* == .llm)
-        .{ .fg = .{ .index = 7 }, .reverse = true }
-    else
-        .{ .fg = .{ .index = 8 } };
-    _ = llm_input_field.printSegment(.{
-        .text = state.llm_input_buf[0..state.llm_input_len.*],
-        .style = llm_input_style,
-    }, .{});
+    state.llm_text_view.draw(llm_messages_window, state.llm_text_buffer.*);
 
-    // Status bar at the bottom
+    const llm_input_y = if (panel_height > 5) panel_height - 5 else 1;
+
+    const llm_prompt_win = llm_panel.child(.{
+        .x_off = 2,
+        .y_off = llm_input_y + 1,
+    });
+    const llm_prompt_style = if (state.active_mode.* == .llm)
+        vaxis.Style{ .fg = .{ .index = 5 }, .bold = true }
+    else
+        vaxis.Style{ .fg = .{ .index = 8 } }; // Gray
+    _ = llm_prompt_win.printSegment(.{ .text = "> ", .style = llm_prompt_style }, .{});
+
+    const llm_input_width = if (llm_chat_width > 6) llm_chat_width - 6 else 1;
+
+    const llm_input_win = llm_panel.child(.{
+        .x_off = 4, // After "> "
+        .y_off = @intCast(llm_input_y),
+        .width = llm_input_width,
+        .height = 3, // Explicit height for border + content
+        .border = .{
+            .where = .all,
+            .style = .{ .fg = .{ .index = 5 } },
+        },
+    });
+
     const mode_text = switch (state.active_mode.*) {
         .chat => "[CHAT]",
         .llm => "[AI]",
         .chat_list => "[SELECT]",
     };
 
-    // Build help text using actual state.keybindings
     var help_buf: [256]u8 = undefined;
     const mode_help = switch (state.active_mode.*) {
         .chat, .llm => try std.fmt.bufPrint(&help_buf, "{s}: Switch | {s}: Send | {s}: Delete", .{ state.keybindings.*.switch_mode, state.keybindings.*.select, state.keybindings.*.backspace }),
@@ -393,6 +444,17 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
         .style = .{ .italic = true, .fg = .{ .index = 8 } }, // Gray
     }, .{});
 
-    // Render the screen
+    if (state.active_mode.* == .chat) {
+        state.llm_input.draw(llm_input_win);
+        state.chat_input.draw(input_win);
+    } else if (state.active_mode.* == .llm) {
+        state.chat_input.draw(input_win);
+        state.llm_input.draw(llm_input_win);
+    } else {
+        state.chat_input.draw(input_win);
+        state.llm_input.draw(llm_input_win);
+        win.hideCursor();
+    }
+
     try state.vx.render(state.tty.writer());
 }

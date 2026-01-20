@@ -45,7 +45,6 @@ fn askPassword(prompt: []const u8, allocator: std.mem.Allocator) ![]u8 {
     try stdout_writer.interface.print("{s} ", .{prompt});
     try stdout_writer.interface.flush();
 
-    // Disable echo
     const termios = std.posix.tcgetattr(stdin_file.handle) catch |err| {
         std.debug.print("Warning: Could not disable echo: {}\n", .{err});
         const line = try stdin_reader.interface.takeDelimiterExclusive('\n');
@@ -59,16 +58,13 @@ fn askPassword(prompt: []const u8, allocator: std.mem.Allocator) ![]u8 {
         std.debug.print("Warning: Could not disable echo: {}\n", .{err});
     };
 
-    // Read password
     const line = stdin_reader.interface.takeDelimiterExclusive('\n') catch |err| {
         std.posix.tcsetattr(stdin_file.handle, .FLUSH, termios) catch {};
         return err;
     };
 
-    // Restore echo
     std.posix.tcsetattr(stdin_file.handle, .FLUSH, termios) catch {};
 
-    // Print newline
     try stdout_writer.interface.print("\n", .{});
     try stdout_writer.interface.flush();
 
@@ -151,7 +147,6 @@ pub fn authenticate(client: *tdlib.Client, allocator: std.mem.Allocator) !User {
     var is_authorized = false;
     var user_data: ?User = null;
 
-    // Main event loop
     while (true) {
         const response_opt = client.receive(1.0);
         if (response_opt) |response| {
@@ -174,13 +169,11 @@ pub fn authenticate(client: *tdlib.Client, allocator: std.mem.Allocator) !User {
                 is_authorized = try handleAuthorizationState(client, auth_state, allocator);
 
                 if (is_authorized) {
-                    // Get current user info
                     const request = try allocator.dupeZ(u8, "{\"@type\":\"getMe\"}");
                     defer allocator.free(request);
                     client.send(request);
                 }
             } else if (is_authorized and std.mem.eql(u8, update_type.string, "user")) {
-                // Parse user data
                 const id = value.object.get("id").?.integer;
                 const first_name = value.object.get("first_name").?.string;
                 const last_name = if (value.object.get("last_name")) |ln| ln.string else "";

@@ -45,7 +45,6 @@ pub const KeyBindings = struct {
     }
 };
 
-// Default keybindings
 pub const DEFAULT_QUIT = "q";
 pub const DEFAULT_QUIT_CTRL = "ctrl+c";
 pub const DEFAULT_SWITCH_MODE = "tab";
@@ -59,14 +58,12 @@ pub const DEFAULT_RELOAD_CONFIG = "ctrl+r";
 pub const DEFAULT_TOGGLE_RIGHT_PANEL = "ctrl+l";
 
 pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
-    // Try to get HOME directory
     const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
 
     const config_path = try std.fs.path.join(alloc, &[_][]const u8{ home, ".config", "zigram", "zigram.json" });
     defer alloc.free(config_path);
 
     const file = std.fs.openFileAbsolute(config_path, .{}) catch {
-        // Config file doesn't exist, return defaults
         return KeyBindings{
             .quit = DEFAULT_QUIT,
             .quit_ctrl = DEFAULT_QUIT_CTRL,
@@ -87,7 +84,11 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
     const content = try file.readToEndAlloc(alloc, 1024 * 1024);
     defer alloc.free(content);
 
-    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, content, .{});
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, content, .{}) catch |err| {
+        std.log.err("Failed to parse config file: {s}", .{@errorName(err)});
+        std.log.err("Please check ~/.config/zigram/zigram.json for JSON syntax errors", .{});
+        return err;
+    };
     defer parsed.deinit();
 
     var keybindings = KeyBindings{
@@ -163,7 +164,6 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
             keybindings.toggle_right_panel = try alloc.dupe(u8, DEFAULT_TOGGLE_RIGHT_PANEL);
         }
     } else {
-        // No keybindings in config, dupe defaults
         keybindings.quit = try alloc.dupe(u8, DEFAULT_QUIT);
         keybindings.quit_ctrl = try alloc.dupe(u8, DEFAULT_QUIT_CTRL);
         keybindings.switch_mode = try alloc.dupe(u8, DEFAULT_SWITCH_MODE);
@@ -208,7 +208,6 @@ fn parseKeyString(key_str: []const u8) ?vaxis.Key {
     var mods = vaxis.Key.Modifiers{};
     var key_part = key_str;
 
-    // Parse modifiers
     if (std.mem.startsWith(u8, key_str, "ctrl+")) {
         mods.ctrl = true;
         key_part = key_str[5..];
@@ -220,7 +219,6 @@ fn parseKeyString(key_str: []const u8) ?vaxis.Key {
         key_part = key_str[6..];
     }
 
-    // Parse key
     if (std.mem.eql(u8, key_part, "enter")) {
         return vaxis.Key{ .codepoint = vaxis.Key.enter, .mods = mods };
     } else if (std.mem.eql(u8, key_part, "tab")) {
@@ -250,7 +248,6 @@ fn parseKeyToHash(key_str: []const u8) ?u64 {
 pub fn buildKeymap(alloc: std.mem.Allocator, keybindings: KeyBindings) !std.AutoHashMap(u64, KeyAction) {
     var keymap = std.AutoHashMap(u64, KeyAction).init(alloc);
 
-    // Map quit keys
     if (parseKeyToHash(keybindings.quit)) |hash| {
         try keymap.put(hash, .quit);
     }
@@ -258,12 +255,10 @@ pub fn buildKeymap(alloc: std.mem.Allocator, keybindings: KeyBindings) !std.Auto
         try keymap.put(hash, .quit);
     }
 
-    // Map switch_mode
     if (parseKeyToHash(keybindings.switch_mode)) |hash| {
         try keymap.put(hash, .switch_mode);
     }
 
-    // Map navigate_up
     if (parseKeyToHash(keybindings.navigate_up)) |hash| {
         try keymap.put(hash, .navigate_up);
     }
@@ -271,7 +266,6 @@ pub fn buildKeymap(alloc: std.mem.Allocator, keybindings: KeyBindings) !std.Auto
         try keymap.put(hash, .navigate_up);
     }
 
-    // Map navigate_down
     if (parseKeyToHash(keybindings.navigate_down)) |hash| {
         try keymap.put(hash, .navigate_down);
     }
@@ -279,22 +273,18 @@ pub fn buildKeymap(alloc: std.mem.Allocator, keybindings: KeyBindings) !std.Auto
         try keymap.put(hash, .navigate_down);
     }
 
-    // Map select/enter
     if (parseKeyToHash(keybindings.select)) |hash| {
         try keymap.put(hash, .select);
     }
 
-    // Map backspace
     if (parseKeyToHash(keybindings.backspace)) |hash| {
         try keymap.put(hash, .delete_char);
     }
 
-    // Map reload_config
     if (parseKeyToHash(keybindings.reload_config)) |hash| {
         try keymap.put(hash, .reload_config);
     }
 
-    // Map toggle_right_panel
     if (parseKeyToHash(keybindings.toggle_right_panel)) |hash| {
         try keymap.put(hash, .toggle_right_panel);
     }

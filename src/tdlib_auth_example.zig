@@ -36,7 +36,6 @@ fn askPassword(prompt: []const u8, allocator: std.mem.Allocator) ![]u8 {
     try stdout_writer.interface.print("{s} ", .{prompt});
     try stdout_writer.interface.flush();
 
-    // Disable echo for password input
     const termios = std.posix.tcgetattr(stdin_file.handle) catch |err| {
         std.debug.print("Warning: Could not disable echo: {}\n", .{err});
         const line = try stdin_reader.interface.takeDelimiterExclusive('\n');
@@ -50,17 +49,13 @@ fn askPassword(prompt: []const u8, allocator: std.mem.Allocator) ![]u8 {
         std.debug.print("Warning: Could not disable echo: {}\n", .{err});
     };
 
-    // Read password
     const line = stdin_reader.interface.takeDelimiterExclusive('\n') catch |err| {
-        // Restore echo on error
         std.posix.tcsetattr(stdin_file.handle, .FLUSH, termios) catch {};
         return err;
     };
 
-    // Restore echo
     std.posix.tcsetattr(stdin_file.handle, .FLUSH, termios) catch {};
 
-    // Print newline since echo was disabled
     try stdout_writer.interface.print("\n", .{});
     try stdout_writer.interface.flush();
 
@@ -79,7 +74,6 @@ fn handleAuthorizationState(
     std.debug.print("\nAuthorization state: {s}\n", .{state_str});
 
     if (std.mem.eql(u8, state_str, "authorizationStateWaitTdlibParameters")) {
-        // Get API credentials from environment or use defaults
         const api_id_str = std.posix.getenv("API_ID") orelse "94575";
         const api_hash = std.posix.getenv("API_HASH") orelse "a3406de8d171bb422bb6ddf3bbd800e2";
         const api_id = try std.fmt.parseInt(i32, api_id_str, 10);
@@ -147,10 +141,8 @@ pub fn main() !void {
 
     std.debug.print("=== TDLib Authentication Example (Zig) ===\n\n", .{});
 
-    // Set log verbosity (0 = fatal errors only, 1 = errors, 2 = warnings, 3+ = info/debug)
     try tdlib.setLogVerbosityLevel(0);
 
-    // Create TDLib client
     const client = try tdlib.Client.create();
     defer client.destroy();
 
@@ -158,11 +150,9 @@ pub fn main() !void {
 
     var is_authorized = false;
 
-    // Main event loop
     while (true) {
         const response_opt = client.receive(1.0);
         if (response_opt) |response| {
-            // Parse JSON response
             const parsed = std.json.parseFromSlice(
                 std.json.Value,
                 allocator,
@@ -183,18 +173,15 @@ pub fn main() !void {
                 is_authorized = try handleAuthorizationState(client, auth_state, allocator);
 
                 if (is_authorized) {
-                    // Get current user info
                     std.debug.print("\nGetting user info...\n", .{});
                     const request = try allocator.dupeZ(u8, "{\"@type\":\"getMe\"}");
                     defer allocator.free(request);
                     client.send(request);
                 }
             } else if (is_authorized and std.mem.eql(u8, update_type.string, "user")) {
-                // Got user info
                 const first_name = value.object.get("first_name") orelse continue;
                 std.debug.print("\nHi, I'm {s}!\n", .{first_name.string});
 
-                // Close the client
                 std.debug.print("\nClosing client...\n", .{});
                 const close_request = try allocator.dupeZ(u8, "{\"@type\":\"close\"}");
                 defer allocator.free(close_request);
@@ -204,7 +191,6 @@ pub fn main() !void {
                 const message = value.object.get("message") orelse continue;
                 std.debug.print("\nError {d}: {s}\n", .{ code.integer, message.string });
 
-                // Close client on authentication errors
                 if (code.integer == 400) { // Bad Request - usually wrong credentials
                     std.debug.print("Authentication failed. Closing...\n", .{});
                     const close_request = try allocator.dupeZ(u8, "{\"@type\":\"close\"}");
@@ -213,7 +199,6 @@ pub fn main() !void {
                 }
             }
 
-            // Check if closed
             if (value.object.get("@type")) |t| {
                 if (std.mem.eql(u8, t.string, "updateAuthorizationState")) {
                     if (value.object.get("authorization_state")) |auth_state| {

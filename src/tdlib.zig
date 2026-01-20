@@ -1,11 +1,9 @@
 const std = @import("std");
 
-// TDLib C bindings for the JSON interface
 pub const c = @cImport({
     @cInclude("td/telegram/td_json_client.h");
 });
 
-/// Opaque TDLib client handle
 pub const Client = opaque {
     pub fn create() !*Client {
         const client = c.td_json_client_create() orelse return error.ClientCreationFailed;
@@ -33,7 +31,6 @@ pub const Client = opaque {
     }
 };
 
-/// Set log verbosity level (synchronous)
 pub fn setLogVerbosityLevel(level: i32) !void {
     var buffer: [256]u8 = undefined;
     const request = try std.fmt.bufPrintZ(
