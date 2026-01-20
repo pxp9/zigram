@@ -437,6 +437,12 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
         .chat_list => "[SELECT]",
     };
 
+    const mode_color = switch (state.active_mode.*) {
+        .chat => vaxis.Color{ .index = 2 }, // Green - matches chat border
+        .llm => vaxis.Color{ .index = 5 }, // Magenta - matches LLM border
+        .chat_list => vaxis.Color{ .index = 4 }, // Blue - matches chat list border
+    };
+
     var help_buf: [256]u8 = undefined;
     const mode_help = switch (state.active_mode.*) {
         .chat, .llm => try std.fmt.bufPrint(&help_buf, "{s}: Switch | {s}: Send | {s}: Delete", .{ state.keybindings.*.switch_mode, state.keybindings.*.select, state.keybindings.*.backspace }),
@@ -444,15 +450,26 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
     };
 
     var status_buf: [512]u8 = undefined;
-    const status = try std.fmt.bufPrint(&status_buf, "Mode: {s} | {s} | {s}/{s}: Quit | {s}: Reload | Terminal: {d}x{d}", .{ mode_text, mode_help, state.keybindings.*.quit, state.keybindings.*.quit_ctrl, state.keybindings.*.reload_config, width, height });
+    const status_rest = try std.fmt.bufPrint(&status_buf, " | {s} | {s}/{s}: Quit | {s}: Reload | Terminal: {d}x{d}", .{ mode_help, state.keybindings.*.quit, state.keybindings.*.quit_ctrl, state.keybindings.*.reload_config, width, height });
     const status_win = win.child(.{
         .x_off = 1,
         .y_off = @intCast(height - 1),
     });
-    _ = status_win.printSegment(.{
-        .text = status,
+    var col: u16 = 0;
+    const r1 = status_win.printSegment(.{
+        .text = "Mode: ",
         .style = .{ .italic = true, .fg = .{ .index = 8 } }, // Gray
     }, .{});
+    col += r1.col;
+    const r2 = status_win.printSegment(.{
+        .text = mode_text,
+        .style = .{ .bold = true, .fg = mode_color },
+    }, .{ .col_offset = col });
+    col += r2.col;
+    _ = status_win.printSegment(.{
+        .text = status_rest,
+        .style = .{ .italic = true, .fg = .{ .index = 8 } }, // Gray
+    }, .{ .col_offset = col });
 
     if (state.active_mode.* == .chat) {
         state.llm_input.draw(llm_input_win);
