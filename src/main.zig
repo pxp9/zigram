@@ -347,12 +347,14 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                         const sender_name = msg_value.object.get("sender_name") orelse continue;
                         const content = msg_value.object.get("content") orelse continue;
                         const is_outgoing = msg_value.object.get("is_outgoing") orelse continue;
+                        const timestamp = msg_value.object.get("timestamp") orelse continue;
 
                         const message = telegram.Message{
                             .id = id.integer,
                             .sender_name = try alloc.dupe(u8, sender_name.string),
                             .content = try alloc.dupe(u8, content.string),
                             .is_outgoing = is_outgoing.bool,
+                            .timestamp = timestamp.integer,
                         };
 
                         try messages.append(alloc, message);
@@ -375,18 +377,23 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                         if (state.chat_messages_cache.getPtr(update.chat_id)) |cached_messages| {
                             const msg_id = msg_obj.object.get("id") orelse return 1;
                             const is_outgoing = msg_obj.object.get("is_outgoing") orelse return 1;
+                            const date = msg_obj.object.get("date") orelse return 1;
 
                             var sender_name: []const u8 = if (is_outgoing.bool) "You" else "Unknown";
 
                             if (!is_outgoing.bool) {
                                 if (msg_obj.object.get("sender_id")) |sender_id_obj| {
                                     if (sender_id_obj.object.get("@type")) |type_val| {
-                                        if (std.mem.eql(u8, type_val.string, "messageSenderUser")) {
-                                            const selected_chat = state.chats.items[state.selected_chat_idx.*];
-                                            sender_name = selected_chat.title;
-                                        } else if (std.mem.eql(u8, type_val.string, "messageSenderChat")) {
-                                            const selected_chat = state.chats.items[state.selected_chat_idx.*];
-                                            sender_name = selected_chat.title;
+                                        if (std.mem.eql(u8, type_val.string, "messageSenderUser") or
+                                            std.mem.eql(u8, type_val.string, "messageSenderChat"))
+                                        {
+                                            // Find the correct chat by matching update.chat_id
+                                            for (state.chats.items) |chat| {
+                                                if (chat.id == update.chat_id) {
+                                                    sender_name = chat.title;
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -417,6 +424,7 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                                 .sender_name = try alloc.dupe(u8, sender_name),
                                 .content = try alloc.dupe(u8, content),
                                 .is_outgoing = is_outgoing.bool,
+                                .timestamp = date.integer,
                             }) catch return 1;
 
                             if (is_at_bottom) {
@@ -565,8 +573,7 @@ fn handle_text_input(state: *AppState, key: vaxis.Key, action: keybindings.KeyAc
     const should_handle = switch (action) {
         .none => true,
         .delete_char => state.active_mode.* == .chat or state.active_mode.* == .llm,
-        .navigate_up, .navigate_down => state.active_mode.* != .chat_list and
-            (state.active_mode.* != .chat or state.chat_input.buf.realLength() > 0),
+        .navigate_up, .navigate_down => state.active_mode.* == .chat or state.active_mode.* == .llm,
         else => false,
     };
 

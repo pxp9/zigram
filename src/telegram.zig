@@ -20,6 +20,7 @@ pub const Message = struct {
     sender_name: []const u8,
     content: []const u8,
     is_outgoing: bool,
+    timestamp: i64,
 
     pub fn deinit(self: *Message, allocator: std.mem.Allocator) void {
         allocator.free(self.sender_name);
@@ -354,6 +355,7 @@ pub fn getChatHistory(
                                 for (retry_msgs.array.items) |msg_value| {
                                     const msg_id = msg_value.object.get("id").?.integer;
                                     const is_outgoing = msg_value.object.get("is_outgoing").?.bool;
+                                    const date = msg_value.object.get("date").?.integer;
 
                                     var sender_name: []const u8 = "Unknown";
                                     var sender_name_owned = false;
@@ -384,6 +386,7 @@ pub fn getChatHistory(
                                         .sender_name = try allocator.dupe(u8, sender_name),
                                         .content = try allocator.dupe(u8, content),
                                         .is_outgoing = is_outgoing,
+                                        .timestamp = date,
                                     });
                                 }
 
@@ -400,6 +403,7 @@ pub fn getChatHistory(
                 for (msgs.array.items) |msg_value| {
                     const msg_id = msg_value.object.get("id").?.integer;
                     const is_outgoing = msg_value.object.get("is_outgoing").?.bool;
+                    const date = msg_value.object.get("date").?.integer;
                     std.log.info("Processing message ID: {d}", .{msg_id});
 
                     var sender_name: []const u8 = "Unknown";
@@ -431,6 +435,7 @@ pub fn getChatHistory(
                         .sender_name = try allocator.dupe(u8, sender_name),
                         .content = try allocator.dupe(u8, content),
                         .is_outgoing = is_outgoing,
+                        .timestamp = date,
                     });
                 }
 

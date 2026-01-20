@@ -11,6 +11,15 @@ const TextInput = vaxis.widgets.TextInput;
 
 pub const MAX_MESSAGE_LENGTH = 2048;
 
+fn formatTimestamp(alloc: std.mem.Allocator, timestamp: i64) ![]const u8 {
+    const epoch_seconds: u64 = @intCast(timestamp);
+    const epoch_day = std.time.epoch.EpochSeconds{ .secs = epoch_seconds };
+    const day_seconds = epoch_day.getDaySeconds();
+    const hours = day_seconds.getHoursIntoDay();
+    const minutes = day_seconds.getMinutesIntoHour();
+    return try std.fmt.allocPrint(alloc, "{d:0>2}:{d:0>2}", .{ hours, minutes });
+}
+
 fn wrapText(alloc: std.mem.Allocator, text: []const u8, width: usize) ![]const u8 {
     if (width == 0) return try alloc.dupe(u8, text);
 
@@ -293,7 +302,8 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
                 state.chat_text_buffer.clear(alloc);
                 const chat_panel_width = if (chat_width > 8) chat_width - 8 else 1;
                 for (messages.items) |msg| {
-                    const msg_text = std.fmt.allocPrint(render_alloc, "{s}: {s}", .{ msg.sender_name, msg.content }) catch continue;
+                    const time_str = formatTimestamp(render_alloc, msg.timestamp) catch "??:??";
+                    const msg_text = std.fmt.allocPrint(render_alloc, "[{s}] {s}: {s}", .{ time_str, msg.sender_name, msg.content }) catch continue;
                     const wrapped = wrapText(render_alloc, msg_text, chat_panel_width) catch continue;
                     const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{wrapped}) catch continue;
                     state.chat_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
