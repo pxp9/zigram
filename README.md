@@ -2,6 +2,8 @@
 
 A Terminal User Interface (TUI) Telegram client written in Zig.
 
+![Zigram Screenshot](assets/app.png)
+
 ## Prerequisites
 
 - Zig 0.15.2 or later
