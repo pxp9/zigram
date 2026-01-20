@@ -372,69 +372,39 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                     ) catch return 1;
                     defer parsed.deinit();
 
-                    const value = parsed.value;
-                    if (value.object.get("message")) |msg_obj| {
-                        if (state.chat_messages_cache.getPtr(update.chat_id)) |cached_messages| {
-                            const msg_id = msg_obj.object.get("id") orelse return 1;
-                            const is_outgoing = msg_obj.object.get("is_outgoing") orelse return 1;
-                            const date = msg_obj.object.get("date") orelse return 1;
+                    const msg_obj = parsed.value.object.get("message") orelse return 1;
+                    const cached_messages = state.chat_messages_cache.getPtr(update.chat_id) orelse return 1;
 
-                            var sender_name: []const u8 = if (is_outgoing.bool) "You" else "Unknown";
+                    const msg_id = msg_obj.object.get("id") orelse return 1;
+                    const is_outgoing = msg_obj.object.get("is_outgoing") orelse return 1;
+                    const date = msg_obj.object.get("date") orelse return 1;
 
-                            if (!is_outgoing.bool) {
-                                if (msg_obj.object.get("sender_id")) |sender_id_obj| {
-                                    if (sender_id_obj.object.get("@type")) |type_val| {
-                                        if (std.mem.eql(u8, type_val.string, "messageSenderUser") or
-                                            std.mem.eql(u8, type_val.string, "messageSenderChat"))
-                                        {
-                                            // Find the correct chat by matching update.chat_id
-                                            for (state.chats.items) |chat| {
-                                                if (chat.id == update.chat_id) {
-                                                    sender_name = chat.title;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                    const sender_name = extractSenderName(msg_obj, is_outgoing.bool, update.chat_id, state.chats.items);
+                    const content = extractMessageContent(msg_obj);
 
-                            var content: []const u8 = "";
-                            if (msg_obj.object.get("content")) |msg_content| {
-                                if (msg_content.object.get("text")) |text_obj| {
-                                    if (text_obj.object.get("text")) |text| {
-                                        content = text.string;
-                                    }
-                                } else if (msg_content.object.get("@type")) |_| {
-                                    content = "[Media]";
-                                }
-                            }
+                    const win_height = state.vx.window().height;
+                    const panel_height = if (win_height > 4) win_height - 2 else 2;
+                    const messages_height = if (panel_height > 6) panel_height - 8 else 1;
+                    const buffer_rows = state.chat_text_buffer.rows;
+                    const max_scroll = buffer_rows -| messages_height;
+                    const current_scroll = state.chat_text_view.scroll_view.scroll.y;
+                    const threshold: usize = 3;
+                    const is_at_bottom = (current_scroll +| threshold >= max_scroll) or buffer_rows <= messages_height;
 
-                            const win_height = state.vx.window().height;
-                            const panel_height = if (win_height > 4) win_height - 2 else 2;
-                            const messages_height = if (panel_height > 6) panel_height - 8 else 1;
-                            const buffer_rows = state.chat_text_buffer.rows;
-                            const max_scroll = buffer_rows -| messages_height;
-                            const current_scroll = state.chat_text_view.scroll_view.scroll.y;
-                            const threshold: usize = 3;
-                            const is_at_bottom = (current_scroll +| threshold >= max_scroll) or buffer_rows <= messages_height;
+                    cached_messages.append(alloc, telegram.Message{
+                        .id = msg_id.integer,
+                        .sender_name = try alloc.dupe(u8, sender_name),
+                        .content = try alloc.dupe(u8, content),
+                        .is_outgoing = is_outgoing.bool,
+                        .timestamp = date.integer,
+                    }) catch return 1;
 
-                            cached_messages.append(alloc, telegram.Message{
-                                .id = msg_id.integer,
-                                .sender_name = try alloc.dupe(u8, sender_name),
-                                .content = try alloc.dupe(u8, content),
-                                .is_outgoing = is_outgoing.bool,
-                                .timestamp = date.integer,
-                            }) catch return 1;
-
-                            if (is_at_bottom) {
-                                const message_lines = 1 + std.mem.count(u8, content, "\n");
-                                state.chat_text_view.scroll_view.scroll.y +|= message_lines;
-                            }
-
-                            std.log.info("Added new message to chat {d}: {s}", .{ update.chat_id, content });
-                        }
+                    if (is_at_bottom) {
+                        const message_lines = 1 + std.mem.count(u8, content, "\n");
+                        state.chat_text_view.scroll_view.scroll.y +|= message_lines;
                     }
+
+                    std.log.info("Added new message to chat {d}: {s}", .{ update.chat_id, content });
                 },
                 .message_edited, .message_deleted, .chat_updated => {
                     std.log.info("Received {s} update for chat {d}", .{ @tagName(update.kind), update.chat_id });
@@ -625,6 +595,52 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
                 return;
             }
 
+            // Handle /model command
+            if (std.mem.eql(u8, input_text, "/model")) {
+                alloc.free(input_text);
+                const models_json = ai.listModels(alloc, state.ai_config) catch |err| {
+                    const error_msg = try std.fmt.allocPrint(alloc, "AI: Error listing models - {any}", .{err});
+                    try state.llm_messages.append(alloc, error_msg);
+                    return;
+                };
+                defer alloc.free(models_json);
+
+                const parsed = std.json.parseFromSlice(std.json.Value, alloc, models_json, .{}) catch {
+                    const error_msg = try alloc.dupe(u8, "AI: Error parsing models response");
+                    try state.llm_messages.append(alloc, error_msg);
+                    return;
+                };
+                defer parsed.deinit();
+
+                const models_array = parsed.value.object.get("models") orelse {
+                    const error_msg = try alloc.dupe(u8, "AI: No models found in response");
+                    try state.llm_messages.append(alloc, error_msg);
+                    return;
+                };
+
+                var result: std.ArrayList(u8) = .empty;
+                defer result.deinit(alloc);
+
+                try result.appendSlice(alloc, "AI: Available models:\n");
+                for (models_array.array.items) |model| {
+                    if (model.object.get("name")) |name| {
+                        const model_name = name.string;
+                        // Extract just the model ID from "models/model-name"
+                        var parts = std.mem.splitSequence(u8, model_name, "/");
+                        _ = parts.next(); // Skip "models"
+                        if (parts.next()) |model_id| {
+                            try result.appendSlice(alloc, "  - ");
+                            try result.appendSlice(alloc, model_id);
+                            try result.appendSlice(alloc, "\n");
+                        }
+                    }
+                }
+
+                const models_msg = try result.toOwnedSlice(alloc);
+                try state.llm_messages.append(alloc, models_msg);
+                return;
+            }
+
             // Build chat list context
             var chat_list: std.ArrayList(u8) = .empty;
             defer chat_list.deinit(alloc);
@@ -645,6 +661,41 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
             try state.ai_queue.postRequest(.{ .send_message = .{ .prompt = enhanced_prompt } });
         },
     }
+}
+
+fn extractSenderName(msg_obj: std.json.Value, is_outgoing: bool, chat_id: i64, chats: []const telegram.Chat) []const u8 {
+    if (is_outgoing) return "You";
+
+    const sender_id_obj = msg_obj.object.get("sender_id") orelse return "Unknown";
+    const type_val = sender_id_obj.object.get("@type") orelse return "Unknown";
+
+    const is_valid_sender = std.mem.eql(u8, type_val.string, "messageSenderUser") or
+        std.mem.eql(u8, type_val.string, "messageSenderChat");
+    if (!is_valid_sender) return "Unknown";
+
+    for (chats) |chat| {
+        if (chat.id == chat_id) {
+            return chat.title;
+        }
+    }
+
+    return "Unknown";
+}
+
+fn extractMessageContent(msg_obj: std.json.Value) []const u8 {
+    const msg_content = msg_obj.object.get("content") orelse return "";
+
+    if (msg_content.object.get("text")) |text_obj| {
+        if (text_obj.object.get("text")) |text| {
+            return text.string;
+        }
+    }
+
+    if (msg_content.object.get("@type")) |_| {
+        return "[Media]";
+    }
+
+    return "";
 }
 
 fn handle_reload_config(alloc: std.mem.Allocator, state: *AppState) !void {

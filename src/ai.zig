@@ -72,6 +72,43 @@ pub fn loadConfig(alloc: std.mem.Allocator) !Config {
     return error.NoAiConfig;
 }
 
+pub fn listModels(alloc: std.mem.Allocator, config: *const Config) ![]const u8 {
+    return switch (config.provider) {
+        .google_ai => try listGoogleAiModels(alloc, &config.google_ai.?),
+    };
+}
+
+fn listGoogleAiModels(alloc: std.mem.Allocator, config: *const GoogleAiConfig) ![]const u8 {
+    var client = std.http.Client{ .allocator = alloc };
+    defer client.deinit();
+
+    const url = "https://generativelanguage.googleapis.com/v1beta/models";
+    const uri = try std.Uri.parse(url);
+
+    var allocating_writer = std.Io.Writer.Allocating.init(alloc);
+    defer allocating_writer.deinit();
+
+    const req = try client.fetch(.{
+        .location = .{ .uri = uri },
+        .method = .GET,
+        .response_writer = &allocating_writer.writer,
+        .extra_headers = &.{
+            .{ .name = "x-goog-api-key", .value = config.api_key },
+        },
+    });
+
+    const response_body = try allocating_writer.toOwnedSlice();
+
+    if (req.status != .ok) {
+        std.log.err("ListModels API request failed with status: {}", .{req.status});
+        std.log.err("Response body: {s}", .{response_body});
+        alloc.free(response_body);
+        return error.ApiRequestFailed;
+    }
+
+    return response_body;
+}
+
 pub fn sendMessageStreaming(alloc: std.mem.Allocator, config: *const Config, prompt: []const u8, loop: anytype) !void {
     return switch (config.provider) {
         .google_ai => try sendGoogleAiMessageStreaming(alloc, &config.google_ai.?, prompt, loop),
@@ -180,6 +217,8 @@ fn sendGoogleAiMessageStreaming(alloc: std.mem.Allocator, config: *const GoogleA
                         .tool_call = tool_call,
                     },
                 });
+                // Stop processing after first tool call to avoid loops
+                break;
             }
             continue;
         }
@@ -309,20 +348,14 @@ pub fn aiAgentLoop(ctx: anytype) void {
                         continue;
                     };
 
-                    // Continue generation with tool result
-                    const combined_prompt = std.mem.join(ctx.alloc, "\n", conversation_history.items) catch continue;
-                    defer ctx.alloc.free(combined_prompt);
-
-                    sendMessageStreaming(ctx.alloc, ctx.config, combined_prompt, ctx.loop) catch |err| {
-                        const error_msg = std.fmt.allocPrint(ctx.alloc, "Error - {any}", .{err}) catch continue;
-                        ctx.loop.postEvent(.{
-                            .ai_update = .{
-                                .kind = .error_occurred,
-                                .data = error_msg,
-                            },
-                        });
-                        continue;
-                    };
+                    // Post the tool result as a message chunk so user can see it
+                    const result_display = ctx.alloc.dupe(u8, result_text) catch continue;
+                    ctx.loop.postEvent(.{
+                        .ai_update = .{
+                            .kind = .message_chunk,
+                            .data = result_display,
+                        },
+                    });
 
                     const completed_msg = ctx.alloc.dupe(u8, "") catch continue;
                     ctx.loop.postEvent(.{
@@ -331,6 +364,8 @@ pub fn aiAgentLoop(ctx: anytype) void {
                             .data = completed_msg,
                         },
                     });
+
+                    std.log.info("Tool result added to conversation history, waiting for user input", .{});
                 },
                 .send_message => |msg| {
                     const prompt_copy = ctx.alloc.dupe(u8, msg.prompt) catch {
