@@ -89,6 +89,9 @@ pub fn main() !void {
     var keymap = try keybindings.buildKeymap(alloc, kb);
     defer keymap.deinit();
 
+    var app_config = try keybindings.loadAppConfig(alloc);
+    defer app_config.deinit(alloc);
+
     var ai_config = ai.loadConfig(alloc) catch |err| blk: {
         std.log.warn("Failed to load AI config: {any}. AI assistant will be disabled.", .{err});
         break :blk ai.Config{ .provider = .google_ai };
@@ -240,6 +243,7 @@ pub fn main() !void {
             .llm_text_buffer = &llm_text_buffer,
             .llm_input = &llm_input,
             .ai_config = &ai_config,
+            .app_config = &app_config,
         };
 
         const status = try handle_event(alloc, event, &state);
@@ -710,22 +714,32 @@ fn handle_reload_config(alloc: std.mem.Allocator, state: *AppState) !void {
         return err;
     };
 
-    const new_ai_config = ai.loadConfig(alloc) catch |err| {
+    var new_ai_config = ai.loadConfig(alloc) catch |err| {
         std.log.err("Failed to reload AI config: {any}", .{err});
         new_keybindings.deinit(alloc);
         new_keymap.deinit();
         return err;
     };
 
+    const new_app_config = keybindings.loadAppConfig(alloc) catch |err| {
+        std.log.err("Failed to reload app config: {any}", .{err});
+        new_keybindings.deinit(alloc);
+        new_keymap.deinit();
+        new_ai_config.deinit(alloc);
+        return err;
+    };
+
     state.keybindings.*.deinit(alloc);
     state.keymap.*.deinit();
     state.ai_config.*.deinit(alloc);
+    state.app_config.*.deinit(alloc);
 
     state.keybindings.* = new_keybindings;
     state.keymap.* = new_keymap;
     state.ai_config.* = new_ai_config;
+    state.app_config.* = new_app_config;
 
-    std.log.info("Config reloaded (keybindings and AI settings)", .{});
+    std.log.info("Config reloaded (keybindings, AI settings, and datetime format)", .{});
 }
 
 fn handle_key_action(alloc: std.mem.Allocator, state: *AppState, action: keybindings.KeyAction) !i32 {

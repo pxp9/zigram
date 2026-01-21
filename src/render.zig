@@ -5,19 +5,43 @@ const telegram = @import("telegram.zig");
 const keybindings = @import("keybindings.zig");
 const ai = @import("ai.zig");
 
+const libc = @cImport({
+    @cInclude("time.h");
+});
+
 const TextView = vaxis.widgets.TextView;
 const TextViewBuffer = TextView.Buffer;
 const TextInput = vaxis.widgets.TextInput;
 
 pub const MAX_MESSAGE_LENGTH = 2048;
 
-fn formatTimestamp(alloc: std.mem.Allocator, timestamp: i64) ![]const u8 {
-    const epoch_seconds: u64 = @intCast(timestamp);
-    const epoch_day = std.time.epoch.EpochSeconds{ .secs = epoch_seconds };
-    const day_seconds = epoch_day.getDaySeconds();
-    const hours = day_seconds.getHoursIntoDay();
-    const minutes = day_seconds.getMinutesIntoHour();
-    return try std.fmt.allocPrint(alloc, "{d:0>2}:{d:0>2}", .{ hours, minutes });
+fn formatTimestamp(alloc: std.mem.Allocator, timestamp: i64, format: []const u8) ![]const u8 {
+    // Convert to time_t for C
+    const time_val: libc.time_t = @intCast(timestamp);
+
+    // Convert to struct tm
+    const tm_ptr = libc.localtime(&time_val);
+    if (tm_ptr == null) {
+        std.log.err("Failed to convert timestamp. Using default format.", .{});
+        return std.fmt.allocPrint(alloc, "??:??", .{});
+    }
+
+    // Create null-terminated format string for C
+    const format_z = try alloc.dupeZ(u8, format);
+    defer alloc.free(format_z);
+
+    // Use strftime to format the timestamp
+    var buf: [128]u8 = undefined;
+    const len = libc.strftime(&buf, buf.len, format_z.ptr, tm_ptr);
+
+    if (len == 0) {
+        std.log.err("Invalid datetime_format '{s}'. Using default format.", .{format});
+        // Fallback to manual formatting
+        const tm = tm_ptr.*;
+        return std.fmt.allocPrint(alloc, "{d:0>2}:{d:0>2}", .{ tm.tm_hour, tm.tm_min });
+    }
+
+    return try alloc.dupe(u8, buf[0..len]);
 }
 
 fn wrapText(alloc: std.mem.Allocator, text: []const u8, width: usize) ![]const u8 {
@@ -111,6 +135,7 @@ pub const AppState = struct {
     llm_text_buffer: *TextViewBuffer,
     llm_input: *TextInput,
     ai_config: *ai.Config,
+    app_config: *keybindings.AppConfig,
 };
 
 pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
@@ -302,7 +327,7 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
                 state.chat_text_buffer.clear(alloc);
                 const chat_panel_width = if (chat_width > 8) chat_width - 8 else 1;
                 for (messages.items) |msg| {
-                    const time_str = formatTimestamp(render_alloc, msg.timestamp) catch "??:??";
+                    const time_str = formatTimestamp(render_alloc, msg.timestamp, state.app_config.datetime_format) catch "??:??";
                     const msg_text = std.fmt.allocPrint(render_alloc, "[{s}] {s}: {s}", .{ time_str, msg.sender_name, msg.content }) catch continue;
                     const wrapped = wrapText(render_alloc, msg_text, chat_panel_width) catch continue;
                     const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{wrapped}) catch continue;

@@ -14,6 +14,19 @@ pub const KeyAction = enum {
     none,
 };
 
+pub const AppConfig = struct {
+    datetime_format: []const u8,
+    allocated: bool = false,
+
+    pub fn deinit(self: *AppConfig, alloc: std.mem.Allocator) void {
+        if (self.allocated) {
+            alloc.free(self.datetime_format);
+        }
+    }
+};
+
+pub const DEFAULT_DATETIME_FORMAT = "%H:%M";
+
 pub const KeyBindings = struct {
     quit: []const u8,
     quit_ctrl: []const u8,
@@ -178,6 +191,45 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
     }
 
     return keybindings;
+}
+
+pub fn loadAppConfig(alloc: std.mem.Allocator) !AppConfig {
+    const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
+
+    const config_path = try std.fs.path.join(alloc, &[_][]const u8{ home, ".config", "zigram", "zigram.json" });
+    defer alloc.free(config_path);
+
+    const file = std.fs.openFileAbsolute(config_path, .{}) catch {
+        return AppConfig{
+            .datetime_format = DEFAULT_DATETIME_FORMAT,
+            .allocated = false,
+        };
+    };
+    defer file.close();
+
+    const content = try file.readToEndAlloc(alloc, 1024 * 1024);
+    defer alloc.free(content);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, content, .{}) catch |err| {
+        std.log.err("Failed to parse config file: {s}", .{@errorName(err)});
+        std.log.err("Please check ~/.config/zigram/zigram.json for JSON syntax errors", .{});
+        return err;
+    };
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    var config = AppConfig{
+        .datetime_format = DEFAULT_DATETIME_FORMAT,
+        .allocated = true,
+    };
+
+    if (root.object.get("datetime_format")) |dt_format| {
+        config.datetime_format = try alloc.dupe(u8, dt_format.string);
+    } else {
+        config.datetime_format = try alloc.dupe(u8, DEFAULT_DATETIME_FORMAT);
+    }
+
+    return config;
 }
 
 const KeyHash = struct {

@@ -50,6 +50,7 @@ You can customize keybindings by creating or editing
       "model": "gemini-2.5-flash-preview"
     }
   },
+  "datetime_format": "%H:%M",
   "keybindings": {
     "quit": "q",
     "quit_ctrl": "ctrl+c",
@@ -83,6 +84,36 @@ You can customize keybindings by creating or editing
 
 After modifying keybindings, press `Ctrl+R` within the application to reload the
 configuration without restarting.
+
+### DateTime Format
+
+You can customize how message timestamps are displayed using the `datetime_format` option in your config file. This uses C's strftime format syntax.
+
+**Default format**: `"%H:%M"` (displays as `HH:MM`, e.g., `14:35`)
+
+**Common format specifiers**:
+
+- `%H` - Hour (00-23)
+- `%M` - Minute (00-59)
+- `%S` - Second (00-59)
+- `%Y` - Year (4 digits, e.g., 2026)
+- `%m` - Month (01-12)
+- `%d` - Day of month (01-31)
+- `%I` - Hour (01-12)
+- `%p` - AM/PM
+- `%A` - Full weekday name (e.g., Monday)
+- `%B` - Full month name (e.g., January)
+
+**Example formats**:
+
+- `"%H:%M"` → `14:35`
+- `"%H:%M:%S"` → `14:35:42`
+- `"%Y-%m-%d %H:%M"` → `2026-01-21 14:35`
+- `"%d/%m/%Y %H:%M"` → `21/01/2026 14:35`
+- `"%I:%M %p"` → `02:35 PM`
+- `"%A, %B %d"` → `Tuesday, January 21`
+
+If the format string is invalid, Zigram will log an error and fall back to the default format. Press `Ctrl+R` to reload after changing the format.
 
 ## Usage Modes
 
