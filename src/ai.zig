@@ -1,16 +1,23 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 
+const default_system_prompt = "You are a helpful assistant integrated into a Telegram client. " ++
+    "Answer in the same language the user is using or in the language the user requests. " ++
+    "Be concise and helpful.";
+
 pub const GoogleAiConfig = struct {
     api_key: []const u8,
     model: []const u8 = "gemini-3-flash-preview",
+    system_prompt: []const u8 = default_system_prompt,
     allocated: bool = false,
+    system_prompt_allocated: bool = false,
 
     pub fn deinit(self: *GoogleAiConfig, alloc: std.mem.Allocator) void {
         if (self.allocated) {
             alloc.free(self.api_key);
             alloc.free(self.model);
         }
+        if (self.system_prompt_allocated) alloc.free(self.system_prompt);
     }
 };
 
@@ -57,13 +64,17 @@ pub fn loadConfig(alloc: std.mem.Allocator) !Config {
             const google_config = ai_obj.object.get("google_ai") orelse return error.NoGoogleAiConfig;
             const api_key = google_config.object.get("api_key") orelse return error.NoApiKey;
             const model_name = if (google_config.object.get("model")) |m| m.string else "gemini-3-flash-preview";
+            const has_custom_prompt = google_config.object.get("system_prompt") != null;
+            const system_prompt = if (google_config.object.get("system_prompt")) |sp| try alloc.dupe(u8, sp.string) else default_system_prompt;
 
             return Config{
                 .provider = .google_ai,
                 .google_ai = GoogleAiConfig{
                     .api_key = try alloc.dupe(u8, api_key.string),
                     .model = try alloc.dupe(u8, model_name),
+                    .system_prompt = system_prompt,
                     .allocated = true,
+                    .system_prompt_allocated = has_custom_prompt,
                 },
             };
         }
@@ -168,9 +179,12 @@ fn sendGoogleAiMessageStreaming(alloc: std.mem.Allocator, config: *const GoogleA
     const contents_json = try buildContentsJson(alloc, history);
     defer alloc.free(contents_json);
 
+    const escaped_system_prompt = try escapeJsonString(alloc, config.system_prompt);
+    defer alloc.free(escaped_system_prompt);
+
     const request_body = try std.fmt.allocPrint(alloc,
-        \\{{"contents":[{s}],"tools":[{{"functionDeclarations":[{{"name":"send_telegram_message","description":"Send a message to a Telegram chat by chat name","parameters":{{"type":"object","properties":{{"chat_name":{{"type":"string","description":"The name/title of the chat to send the message to"}},"message_text":{{"type":"string","description":"The text content of the message to send"}}}},"required":["chat_name","message_text"]}}}}]}}]}}
-    , .{contents_json});
+        \\{{"systemInstruction":{{"parts":[{{"text":"{s}"}}]}},"contents":[{s}],"tools":[{{"functionDeclarations":[{{"name":"send_telegram_message","description":"Send a message to a Telegram chat by chat name","parameters":{{"type":"object","properties":{{"chat_name":{{"type":"string","description":"The name/title of the chat to send the message to"}},"message_text":{{"type":"string","description":"The text content of the message to send"}}}},"required":["chat_name","message_text"]}}}}]}}]}}
+    , .{ escaped_system_prompt, contents_json });
     defer alloc.free(request_body);
 
     const uri = try std.Uri.parse(url);

@@ -47,7 +47,8 @@ You can customize keybindings by creating or editing
     "provider": "google_ai",
     "google_ai": {
       "api_key": "your_key",
-      "model": "gemini-2.5-flash-preview"
+      "model": "gemini-2.5-flash-preview",
+      "system_prompt": "Your custom system prompt here"
     }
   },
   "datetime_format": "%H:%M",
@@ -114,6 +115,17 @@ You can customize how message timestamps are displayed using the `datetime_forma
 - `"%A, %B %d"` → `Tuesday, January 21`
 
 If the format string is invalid, Zigram will log an error and fall back to the default format. Press `Ctrl+R` to reload after changing the format.
+
+### AI System Prompt
+
+You can customize the AI assistant's behavior by setting a `system_prompt` in your config file.
+
+**Default system prompt**:
+```
+You are a helpful assistant integrated into a Telegram client. Answer in the same language the user is using or in the language the user requests. Be concise and helpful.
+```
+
+To override it, add `system_prompt` to the `google_ai` section in your config file (see example above).
 
 ## Usage Modes
 
