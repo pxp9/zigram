@@ -157,7 +157,8 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32)
 
             std.log.info("Update type: {s}", .{update_type.string});
             if (!std.mem.eql(u8, update_type.string, "chats") and
-                !std.mem.eql(u8, update_type.string, "chat")) {
+                !std.mem.eql(u8, update_type.string, "chat"))
+            {
                 std.log.info("Skipping update type: {s}", .{update_type.string});
                 continue;
             }
@@ -458,13 +459,12 @@ pub fn sendMessage(
     const request = try formatRequestZ(
         allocator,
         \\{{"@type":"sendMessage","chat_id":{d},"input_message_content":{{"@type":"inputMessageText","text":{{"@type":"formattedText","text":"{s}"}}}}}}
-        ,
+    ,
         .{ chat_id, text },
     );
     defer allocator.free(request);
     client.send(request);
 }
-
 
 pub const TelegramUpdateKind = enum {
     new_message,
@@ -555,7 +555,7 @@ pub fn telegramUpdateLoop(ctx: anytype) void {
                     chats.deinit(ctx.alloc);
                 },
                 .load_chat_history => |req| {
-                    std.log.info("Processing load_chat_history request, chat_id={d}, limit={d}", .{req.chat_id, req.limit});
+                    std.log.info("Processing load_chat_history request, chat_id={d}, limit={d}", .{ req.chat_id, req.limit });
                     var messages = getChatHistory(ctx.client, ctx.alloc, req.chat_id, @intCast(req.limit)) catch |err| {
                         std.log.err("Failed to load chat history: {any}", .{err});
                         continue;
@@ -635,7 +635,8 @@ pub fn telegramUpdateLoop(ctx: anytype) void {
                 chat_id = cid.integer;
             }
         } else if (std.mem.eql(u8, update_type.string, "updateChatTitle") or
-                   std.mem.eql(u8, update_type.string, "updateChatPhoto")) {
+            std.mem.eql(u8, update_type.string, "updateChatPhoto"))
+        {
             kind = .chat_updated;
             if (value.object.get("chat_id")) |cid| {
                 chat_id = cid.integer;

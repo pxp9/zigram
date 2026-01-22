@@ -82,7 +82,7 @@ fn handleAuthorizationState(
         const request = try formatRequestZ(
             allocator,
             \\{{"@type":"setTdlibParameters","database_directory":".data/tdlib","use_test_dc":false,"api_id":{d},"api_hash":"{s}","system_language_code":"en","device_model":"Desktop","application_version":"0.1.0","use_message_database":true,"use_secret_chats":false}}
-            ,
+        ,
             .{ api_id, api_hash },
         );
         defer allocator.free(request);
