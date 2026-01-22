@@ -86,7 +86,7 @@ pub fn main() !void {
     var kb = try keybindings.loadKeybindings(alloc);
     defer kb.deinit(alloc);
 
-    var keymap = try keybindings.buildKeymap(alloc, kb);
+    var keymap = try keybindings.buildModeKeymap(alloc, kb);
     defer keymap.deinit();
 
     var app_config = try keybindings.loadAppConfig(alloc);
@@ -421,103 +421,21 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
         },
         .ai_update => |update| {
             defer alloc.free(update.data);
+            defer if (update.tool_call) |tool| {
+                alloc.free(tool.tool_name);
+                alloc.free(tool.chat_name);
+                alloc.free(tool.message_text);
+            };
 
-            switch (update.kind) {
-                .message_chunk => {
-                    const win_height = state.vx.window().height;
-                    const panel_height = if (win_height > 4) win_height - 2 else 2;
-                    const messages_height = if (panel_height > 6) panel_height - 8 else 1;
-                    const buffer_rows = state.llm_text_buffer.rows;
-                    const max_scroll = buffer_rows -| messages_height;
-                    const current_scroll = state.llm_text_view.scroll_view.scroll.y;
-                    const threshold: usize = 3;
-                    const is_at_bottom = (current_scroll +| threshold >= max_scroll) or buffer_rows <= messages_height;
+            const is_at_bottom = isLlmViewAtBottom(state);
+            const chat_infos = buildChatInfoList(alloc, state.chats.items) catch return 1;
+            defer alloc.free(chat_infos);
 
-                    // Check if this is the first chunk (need to create initial message)
-                    const is_first_chunk = state.llm_messages.items.len == 0 or
-                        (state.llm_messages.items.len > 0 and
-                        !std.mem.startsWith(u8, state.llm_messages.items[state.llm_messages.items.len - 1], "AI:"));
+            const results = ai.handleAiUpdate(alloc, update, state.llm_messages.items, chat_infos) catch return 1;
+            defer alloc.free(results);
 
-                    if (is_first_chunk) {
-                        const initial_msg = try std.fmt.allocPrint(alloc, "AI: {s}", .{update.data});
-                        try state.llm_messages.append(alloc, initial_msg);
-                    } else {
-                        const last_idx = state.llm_messages.items.len - 1;
-                        const old_msg = state.llm_messages.items[last_idx];
-                        const new_msg = try std.fmt.allocPrint(alloc, "{s}{s}", .{ old_msg, update.data });
-                        alloc.free(old_msg);
-                        state.llm_messages.items[last_idx] = new_msg;
-                    }
-
-                    if (is_at_bottom) {
-                        const chunk_lines = 1 + std.mem.count(u8, update.data, "\n");
-                        state.llm_text_view.scroll_view.scroll.y +|= chunk_lines;
-                    }
-
-                    std.log.info("AI chunk received", .{});
-                },
-                .message_completed => {
-                    state.llm_loading.* = false;
-                    std.log.info("AI message completed", .{});
-                },
-                .error_occurred => {
-                    state.llm_loading.* = false;
-                    const error_msg = try std.fmt.allocPrint(alloc, "AI: {s}", .{update.data});
-                    try state.llm_messages.append(alloc, error_msg);
-                    std.log.err("AI error: {s}", .{update.data});
-                },
-                .tool_call => {
-                    if (update.tool_call) |tool| {
-                        defer {
-                            alloc.free(tool.tool_name);
-                            alloc.free(tool.chat_name);
-                            alloc.free(tool.message_text);
-                        }
-
-                        std.log.info("AI requested tool call: {s} for chat '{s}'", .{ tool.tool_name, tool.chat_name });
-
-                        const tool_msg = try std.fmt.allocPrint(alloc, "AI: [Sending message to '{s}'...]", .{tool.chat_name});
-                        try state.llm_messages.append(alloc, tool_msg);
-
-                        // Find chat by name
-                        var found_chat_id: ?i64 = null;
-                        for (state.chats.items) |chat| {
-                            if (std.mem.eql(u8, chat.title, tool.chat_name)) {
-                                found_chat_id = chat.id;
-                                break;
-                            }
-                        }
-
-                        if (found_chat_id) |chat_id| {
-                            // Send message via Telegram
-                            const msg_copy = try alloc.dupe(u8, tool.message_text);
-                            try state.telegram_queue.postRequest(.{
-                                .send_message = .{
-                                    .chat_id = chat_id,
-                                    .text = msg_copy,
-                                },
-                            });
-
-                            // Report success back to AI
-                            const success_msg = try std.fmt.allocPrint(alloc, "Message sent successfully to chat '{s}'", .{tool.chat_name});
-                            try state.ai_queue.postRequest(.{
-                                .tool_result = .{
-                                    .success = true,
-                                    .message = success_msg,
-                                },
-                            });
-                        } else {
-                            // Chat not found
-                            const error_msg = try std.fmt.allocPrint(alloc, "Chat '{s}' not found in your conversations", .{tool.chat_name});
-                            try state.ai_queue.postRequest(.{
-                                .tool_result = .{
-                                    .success = false,
-                                    .message = error_msg,
-                                },
-                            });
-                        }
-                    }
-                },
+            for (results) |result| {
+                try applyAiUpdateResult(alloc, state, result, is_at_bottom);
             }
         },
     }
@@ -525,29 +443,96 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
     return 1;
 }
 
-fn handle_scroll_input(state: *AppState, key: vaxis.Key) bool {
-    const is_scroll_key = key.codepoint == vaxis.Key.up or key.codepoint == vaxis.Key.down;
-    const can_scroll_chat = state.active_mode.* == .chat and state.chat_input.buf.realLength() == 0 and is_scroll_key;
-    const can_scroll_llm = state.active_mode.* == .llm and state.llm_input.buf.realLength() == 0 and is_scroll_key;
+fn isLlmViewAtBottom(state: *AppState) bool {
+    const win_height = state.vx.window().height;
+    const panel_height = if (win_height > 4) win_height - 2 else 2;
+    const messages_height = if (panel_height > 6) panel_height - 8 else 1;
+    const buffer_rows = state.llm_text_buffer.rows;
+    const max_scroll = buffer_rows -| messages_height;
+    const current_scroll = state.llm_text_view.scroll_view.scroll.y;
+    const threshold: usize = 3;
+    return (current_scroll +| threshold >= max_scroll) or buffer_rows <= messages_height;
+}
 
-    if (can_scroll_chat) {
-        state.chat_text_view.input(key);
-        return true;
+fn buildChatInfoList(alloc: std.mem.Allocator, chats: []telegram.Chat) ![]ai.ChatInfo {
+    var infos: std.ArrayList(ai.ChatInfo) = .empty;
+    errdefer infos.deinit(alloc);
+    for (chats) |chat| {
+        try infos.append(alloc, .{ .id = chat.id, .title = chat.title });
+    }
+    return try infos.toOwnedSlice(alloc);
+}
+
+fn applyAiUpdateResult(alloc: std.mem.Allocator, state: *AppState, result: ai.AiUpdateResult, is_at_bottom: bool) !void {
+    switch (result) {
+        .none => {},
+        .append_chunk => |chunk| {
+            if (chunk.is_first) {
+                const msg = try std.fmt.allocPrint(alloc, "AI: {s}", .{chunk.text});
+                try state.llm_messages.append(alloc, msg);
+            } else {
+                const last_idx = state.llm_messages.items.len - 1;
+                const old_msg = state.llm_messages.items[last_idx];
+                const new_msg = try std.fmt.allocPrint(alloc, "{s}{s}", .{ old_msg, chunk.text });
+                alloc.free(old_msg);
+                state.llm_messages.items[last_idx] = new_msg;
+            }
+            if (is_at_bottom) {
+                const chunk_lines = 1 + std.mem.count(u8, chunk.text, "\n");
+                state.llm_text_view.scroll_view.scroll.y +|= chunk_lines;
+            }
+            std.log.info("AI chunk received", .{});
+        },
+        .set_loading => |loading| {
+            state.llm_loading.* = loading;
+            std.log.info("AI message completed", .{});
+        },
+        .append_error => |err_text| {
+            const error_msg = try std.fmt.allocPrint(alloc, "AI: {s}", .{err_text});
+            try state.llm_messages.append(alloc, error_msg);
+            std.log.err("AI error: {s}", .{err_text});
+        },
+        .append_tool_status => |chat_name| {
+            const tool_msg = try std.fmt.allocPrint(alloc, "AI: [Sending message to '{s}'...]", .{chat_name});
+            try state.llm_messages.append(alloc, tool_msg);
+            std.log.info("AI requested tool call for chat '{s}'", .{chat_name});
+        },
+        .send_telegram => |msg| {
+            const text_copy = try alloc.dupe(u8, msg.text);
+            try state.telegram_queue.postRequest(.{
+                .send_message = .{ .chat_id = msg.chat_id, .text = text_copy },
+            });
+        },
+        .post_tool_result => |res| {
+            const message = if (res.success)
+                try std.fmt.allocPrint(alloc, "Message sent successfully to chat '{s}'", .{res.message})
+            else
+                try std.fmt.allocPrint(alloc, "Chat '{s}' not found in your conversations", .{res.message});
+            try state.ai_queue.postRequest(.{ .tool_result = .{ .success = res.success, .message = message } });
+        },
+    }
+}
+
+fn handle_scroll_input(state: *AppState, action: keybindings.KeyAction) bool {
+    const scroll_view = switch (state.active_mode.*) {
+        .chat => &state.chat_text_view.scroll_view,
+        .llm => &state.llm_text_view.scroll_view,
+        .chat_list => return false,
+    };
+
+    switch (action) {
+        .scroll_up => scroll_view.scroll.y -|= 1,
+        .scroll_down => scroll_view.scroll.y +|= 1,
+        else => return false,
     }
 
-    if (can_scroll_llm) {
-        state.llm_text_view.input(key);
-        return true;
-    }
-
-    return false;
+    return true;
 }
 
 fn handle_text_input(state: *AppState, key: vaxis.Key, action: keybindings.KeyAction) bool {
     const should_handle = switch (action) {
         .none => true,
         .delete_char => state.active_mode.* == .chat or state.active_mode.* == .llm,
-        .navigate_up, .navigate_down => state.active_mode.* == .chat or state.active_mode.* == .llm,
         else => false,
     };
 
@@ -708,7 +693,7 @@ fn handle_reload_config(alloc: std.mem.Allocator, state: *AppState) !void {
         return err;
     };
 
-    var new_keymap = keybindings.buildKeymap(alloc, new_keybindings) catch |err| {
+    var new_keymap = keybindings.buildModeKeymap(alloc, new_keybindings) catch |err| {
         std.log.err("Failed to build keymap: {any}", .{err});
         new_keybindings.deinit(alloc);
         return err;
@@ -774,15 +759,15 @@ fn handle_key_action(alloc: std.mem.Allocator, state: *AppState, action: keybind
             };
             std.log.info("Toggled right panel to {s}", .{@tagName(state.right_panel_mode.*)});
         },
-        .delete_char, .send_message, .none => {},
+        .scroll_up, .scroll_down, .delete_char, .send_message, .none => {},
     }
     return 1;
 }
 
 fn handle_key_press(alloc: std.mem.Allocator, state: *AppState, key: vaxis.Key) !i32 {
-    if (handle_scroll_input(state, key)) return 1;
+    const action = keybindings.getKeyAction(state.keymap, state.active_mode.*, key);
 
-    const action = keybindings.getKeyAction(state.keymap, key);
+    if (handle_scroll_input(state, action)) return 1;
 
     if (handle_text_input(state, key, action)) return 1;
 

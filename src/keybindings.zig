@@ -1,11 +1,16 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const render = @import("render.zig");
+
+pub const InputMode = render.InputMode;
 
 pub const KeyAction = enum {
     quit,
     switch_mode,
     navigate_up,
     navigate_down,
+    scroll_up,
+    scroll_down,
     select,
     send_message,
     delete_char,
@@ -35,6 +40,8 @@ pub const KeyBindings = struct {
     navigate_up_alt: []const u8,
     navigate_down: []const u8,
     navigate_down_alt: []const u8,
+    scroll_up: []const u8,
+    scroll_down: []const u8,
     select: []const u8,
     backspace: []const u8,
     reload_config: []const u8,
@@ -50,6 +57,8 @@ pub const KeyBindings = struct {
             alloc.free(self.navigate_up_alt);
             alloc.free(self.navigate_down);
             alloc.free(self.navigate_down_alt);
+            alloc.free(self.scroll_up);
+            alloc.free(self.scroll_down);
             alloc.free(self.select);
             alloc.free(self.backspace);
             alloc.free(self.reload_config);
@@ -65,6 +74,8 @@ pub const DEFAULT_NAVIGATE_UP = "k";
 pub const DEFAULT_NAVIGATE_UP_ALT = "up";
 pub const DEFAULT_NAVIGATE_DOWN = "j";
 pub const DEFAULT_NAVIGATE_DOWN_ALT = "down";
+pub const DEFAULT_SCROLL_UP = "up";
+pub const DEFAULT_SCROLL_DOWN = "down";
 pub const DEFAULT_SELECT = "enter";
 pub const DEFAULT_BACKSPACE = "backspace";
 pub const DEFAULT_RELOAD_CONFIG = "ctrl+r";
@@ -85,6 +96,8 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
             .navigate_up_alt = DEFAULT_NAVIGATE_UP_ALT,
             .navigate_down = DEFAULT_NAVIGATE_DOWN,
             .navigate_down_alt = DEFAULT_NAVIGATE_DOWN_ALT,
+            .scroll_up = DEFAULT_SCROLL_UP,
+            .scroll_down = DEFAULT_SCROLL_DOWN,
             .select = DEFAULT_SELECT,
             .backspace = DEFAULT_BACKSPACE,
             .reload_config = DEFAULT_RELOAD_CONFIG,
@@ -112,6 +125,8 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
         .navigate_up_alt = DEFAULT_NAVIGATE_UP_ALT,
         .navigate_down = DEFAULT_NAVIGATE_DOWN,
         .navigate_down_alt = DEFAULT_NAVIGATE_DOWN_ALT,
+        .scroll_up = DEFAULT_SCROLL_UP,
+        .scroll_down = DEFAULT_SCROLL_DOWN,
         .select = DEFAULT_SELECT,
         .backspace = DEFAULT_BACKSPACE,
         .reload_config = DEFAULT_RELOAD_CONFIG,
@@ -156,6 +171,16 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
         } else {
             keybindings.navigate_down_alt = try alloc.dupe(u8, DEFAULT_NAVIGATE_DOWN_ALT);
         }
+        if (kb_obj.object.get("scroll_up")) |v| {
+            keybindings.scroll_up = try alloc.dupe(u8, v.string);
+        } else {
+            keybindings.scroll_up = try alloc.dupe(u8, DEFAULT_SCROLL_UP);
+        }
+        if (kb_obj.object.get("scroll_down")) |v| {
+            keybindings.scroll_down = try alloc.dupe(u8, v.string);
+        } else {
+            keybindings.scroll_down = try alloc.dupe(u8, DEFAULT_SCROLL_DOWN);
+        }
         if (kb_obj.object.get("select")) |v| {
             keybindings.select = try alloc.dupe(u8, v.string);
         } else {
@@ -184,6 +209,8 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
         keybindings.navigate_up_alt = try alloc.dupe(u8, DEFAULT_NAVIGATE_UP_ALT);
         keybindings.navigate_down = try alloc.dupe(u8, DEFAULT_NAVIGATE_DOWN);
         keybindings.navigate_down_alt = try alloc.dupe(u8, DEFAULT_NAVIGATE_DOWN_ALT);
+        keybindings.scroll_up = try alloc.dupe(u8, DEFAULT_SCROLL_UP);
+        keybindings.scroll_down = try alloc.dupe(u8, DEFAULT_SCROLL_DOWN);
         keybindings.select = try alloc.dupe(u8, DEFAULT_SELECT);
         keybindings.backspace = try alloc.dupe(u8, DEFAULT_BACKSPACE);
         keybindings.reload_config = try alloc.dupe(u8, DEFAULT_RELOAD_CONFIG);
@@ -297,54 +324,81 @@ fn parseKeyToHash(key_str: []const u8) ?u64 {
     return KeyHash.fromKey(key).toU64();
 }
 
-pub fn buildKeymap(alloc: std.mem.Allocator, keybindings: KeyBindings) !std.AutoHashMap(u64, KeyAction) {
-    var keymap = std.AutoHashMap(u64, KeyAction).init(alloc);
+pub const ModeKeymap = struct {
+    chat: std.AutoHashMap(u64, KeyAction),
+    llm: std.AutoHashMap(u64, KeyAction),
+    chat_list: std.AutoHashMap(u64, KeyAction),
 
-    if (parseKeyToHash(keybindings.quit)) |hash| {
-        try keymap.put(hash, .quit);
-    }
-    if (parseKeyToHash(keybindings.quit_ctrl)) |hash| {
-        try keymap.put(hash, .quit);
+    pub fn deinit(self: *ModeKeymap) void {
+        self.chat.deinit();
+        self.llm.deinit();
+        self.chat_list.deinit();
     }
 
-    if (parseKeyToHash(keybindings.switch_mode)) |hash| {
-        try keymap.put(hash, .switch_mode);
+    pub fn get(self: *const ModeKeymap, mode: InputMode) *const std.AutoHashMap(u64, KeyAction) {
+        return switch (mode) {
+            .chat => &self.chat,
+            .llm => &self.llm,
+            .chat_list => &self.chat_list,
+        };
+    }
+};
+
+pub fn buildModeKeymap(alloc: std.mem.Allocator, keybindings: KeyBindings) !ModeKeymap {
+    var chat_keymap = std.AutoHashMap(u64, KeyAction).init(alloc);
+    var llm_keymap = std.AutoHashMap(u64, KeyAction).init(alloc);
+    var chat_list_keymap = std.AutoHashMap(u64, KeyAction).init(alloc);
+
+    const global_bindings = [_]struct { key: []const u8, action: KeyAction }{
+        .{ .key = keybindings.quit, .action = .quit },
+        .{ .key = keybindings.quit_ctrl, .action = .quit },
+        .{ .key = keybindings.switch_mode, .action = .switch_mode },
+        .{ .key = keybindings.select, .action = .select },
+        .{ .key = keybindings.backspace, .action = .delete_char },
+        .{ .key = keybindings.reload_config, .action = .reload_config },
+        .{ .key = keybindings.toggle_right_panel, .action = .toggle_right_panel },
+    };
+
+    for (global_bindings) |binding| {
+        if (parseKeyToHash(binding.key)) |hash| {
+            try chat_keymap.put(hash, binding.action);
+            try llm_keymap.put(hash, binding.action);
+            try chat_list_keymap.put(hash, binding.action);
+        }
+    }
+
+    if (parseKeyToHash(keybindings.scroll_up)) |hash| {
+        try chat_keymap.put(hash, .scroll_up);
+        try llm_keymap.put(hash, .scroll_up);
+        try chat_list_keymap.put(hash, .navigate_up);
+    }
+    if (parseKeyToHash(keybindings.scroll_down)) |hash| {
+        try chat_keymap.put(hash, .scroll_down);
+        try llm_keymap.put(hash, .scroll_down);
+        try chat_list_keymap.put(hash, .navigate_down);
     }
 
     if (parseKeyToHash(keybindings.navigate_up)) |hash| {
-        try keymap.put(hash, .navigate_up);
+        try chat_list_keymap.put(hash, .navigate_up);
     }
     if (parseKeyToHash(keybindings.navigate_up_alt)) |hash| {
-        try keymap.put(hash, .navigate_up);
+        try chat_list_keymap.put(hash, .navigate_up);
     }
-
     if (parseKeyToHash(keybindings.navigate_down)) |hash| {
-        try keymap.put(hash, .navigate_down);
+        try chat_list_keymap.put(hash, .navigate_down);
     }
     if (parseKeyToHash(keybindings.navigate_down_alt)) |hash| {
-        try keymap.put(hash, .navigate_down);
+        try chat_list_keymap.put(hash, .navigate_down);
     }
 
-    if (parseKeyToHash(keybindings.select)) |hash| {
-        try keymap.put(hash, .select);
-    }
-
-    if (parseKeyToHash(keybindings.backspace)) |hash| {
-        try keymap.put(hash, .delete_char);
-    }
-
-    if (parseKeyToHash(keybindings.reload_config)) |hash| {
-        try keymap.put(hash, .reload_config);
-    }
-
-    if (parseKeyToHash(keybindings.toggle_right_panel)) |hash| {
-        try keymap.put(hash, .toggle_right_panel);
-    }
-
-    return keymap;
+    return ModeKeymap{
+        .chat = chat_keymap,
+        .llm = llm_keymap,
+        .chat_list = chat_list_keymap,
+    };
 }
 
-pub fn getKeyAction(keymap: *const std.AutoHashMap(u64, KeyAction), key: vaxis.Key) KeyAction {
+pub fn getKeyAction(keymap: *const ModeKeymap, mode: InputMode, key: vaxis.Key) KeyAction {
     const hash = KeyHash.fromKey(key).toU64();
-    return keymap.get(hash) orelse .none;
+    return keymap.get(mode).get(hash) orelse .none;
 }

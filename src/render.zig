@@ -59,7 +59,7 @@ fn wrapText(alloc: std.mem.Allocator, text: []const u8, width: usize) ![]const u
         const c = text[i];
 
         if (c == '\n') {
-            try result.appendSlice(alloc, text[line_start..i + 1]);
+            try result.appendSlice(alloc, text[line_start .. i + 1]);
             line_start = i + 1;
             col = 0;
             last_space = null;
@@ -125,7 +125,7 @@ pub const AppState = struct {
     llm_loading: *bool,
     log_messages: *std.ArrayList([]const u8),
     keybindings: *keybindings.KeyBindings,
-    keymap: *std.AutoHashMap(u64, keybindings.KeyAction),
+    keymap: *keybindings.ModeKeymap,
     telegram_queue: *telegram.TelegramQueue,
     ai_queue: *ai.AiQueue,
     chat_text_view: *TextView,

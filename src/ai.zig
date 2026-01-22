@@ -109,9 +109,9 @@ fn listGoogleAiModels(alloc: std.mem.Allocator, config: *const GoogleAiConfig) !
     return response_body;
 }
 
-pub fn sendMessageStreaming(alloc: std.mem.Allocator, config: *const Config, prompt: []const u8, loop: anytype) !void {
+pub fn sendMessageStreaming(alloc: std.mem.Allocator, config: *const Config, history: []const ConversationMessage, loop: anytype) ![]const u8 {
     return switch (config.provider) {
-        .google_ai => try sendGoogleAiMessageStreaming(alloc, &config.google_ai.?, prompt, loop),
+        .google_ai => try sendGoogleAiMessageStreaming(alloc, &config.google_ai.?, history, loop),
     };
 }
 
@@ -135,19 +135,42 @@ fn escapeJsonString(alloc: std.mem.Allocator, input: []const u8) ![]const u8 {
     return try result.toOwnedSlice(alloc);
 }
 
-fn sendGoogleAiMessageStreaming(alloc: std.mem.Allocator, config: *const GoogleAiConfig, prompt: []const u8, loop: anytype) !void {
+fn buildContentsJson(alloc: std.mem.Allocator, history: []const ConversationMessage) ![]const u8 {
+    var result: std.ArrayList(u8) = .empty;
+    defer result.deinit(alloc);
+
+    for (history, 0..) |msg, i| {
+        if (i > 0) try result.appendSlice(alloc, ",");
+
+        const role = switch (msg.role) {
+            .user, .tool => "user",
+            .model => "model",
+        };
+        const escaped = try escapeJsonString(alloc, msg.content);
+        defer alloc.free(escaped);
+
+        const content = try std.fmt.allocPrint(alloc, "{{\"role\":\"{s}\",\"parts\":[{{\"text\":\"{s}\"}}]}}", .{ role, escaped });
+        defer alloc.free(content);
+
+        try result.appendSlice(alloc, content);
+    }
+
+    return try result.toOwnedSlice(alloc);
+}
+
+fn sendGoogleAiMessageStreaming(alloc: std.mem.Allocator, config: *const GoogleAiConfig, history: []const ConversationMessage, loop: anytype) ![]const u8 {
     var client = std.http.Client{ .allocator = alloc };
     defer client.deinit();
 
     const url = try std.fmt.allocPrint(alloc, "https://generativelanguage.googleapis.com/v1beta/models/{s}:streamGenerateContent?alt=sse", .{config.model});
     defer alloc.free(url);
 
-    const escaped_prompt = try escapeJsonString(alloc, prompt);
-    defer alloc.free(escaped_prompt);
+    const contents_json = try buildContentsJson(alloc, history);
+    defer alloc.free(contents_json);
 
     const request_body = try std.fmt.allocPrint(alloc,
-        \\{{"contents":[{{"parts":[{{"text":"{s}"}}]}}],"tools":[{{"functionDeclarations":[{{"name":"send_telegram_message","description":"Send a message to a Telegram chat by chat name","parameters":{{"type":"object","properties":{{"chat_name":{{"type":"string","description":"The name/title of the chat to send the message to"}},"message_text":{{"type":"string","description":"The text content of the message to send"}}}},"required":["chat_name","message_text"]}}}}]}}]}}
-    , .{escaped_prompt});
+        \\{{"contents":[{s}],"tools":[{{"functionDeclarations":[{{"name":"send_telegram_message","description":"Send a message to a Telegram chat by chat name","parameters":{{"type":"object","properties":{{"chat_name":{{"type":"string","description":"The name/title of the chat to send the message to"}},"message_text":{{"type":"string","description":"The text content of the message to send"}}}},"required":["chat_name","message_text"]}}}}]}}]}}
+    , .{contents_json});
     defer alloc.free(request_body);
 
     const uri = try std.Uri.parse(url);
@@ -175,10 +198,13 @@ fn sendGoogleAiMessageStreaming(alloc: std.mem.Allocator, config: *const GoogleA
         return error.ApiRequestFailed;
     }
 
+    var full_response: std.ArrayList(u8) = .empty;
+    errdefer full_response.deinit(alloc);
+
     var line_iter = std.mem.splitSequence(u8, response_body, "\n");
     while (line_iter.next()) |line| {
         if (!std.mem.startsWith(u8, line, "data: ")) continue;
-        const json_data = line[6..]; // Skip "data: " prefix
+        const json_data = line[6..];
 
         if (std.mem.eql(u8, json_data, "[DONE]")) break;
 
@@ -196,7 +222,6 @@ fn sendGoogleAiMessageStreaming(alloc: std.mem.Allocator, config: *const GoogleA
 
         const part = parts.array.items[0];
 
-        // Check for function call
         if (part.object.get("functionCall")) |func_call| {
             const func_name = func_call.object.get("name") orelse continue;
             if (std.mem.eql(u8, func_name.string, "send_telegram_message")) {
@@ -210,6 +235,10 @@ fn sendGoogleAiMessageStreaming(alloc: std.mem.Allocator, config: *const GoogleA
                     .message_text = try alloc.dupe(u8, message_text.string),
                 };
 
+                const tool_response = try std.fmt.allocPrint(alloc, "[Tool call: {s}]", .{func_name.string});
+                try full_response.appendSlice(alloc, tool_response);
+                alloc.free(tool_response);
+
                 loop.postEvent(.{
                     .ai_update = .{
                         .kind = .tool_call,
@@ -217,14 +246,14 @@ fn sendGoogleAiMessageStreaming(alloc: std.mem.Allocator, config: *const GoogleA
                         .tool_call = tool_call,
                     },
                 });
-                // Stop processing after first tool call to avoid loops
                 break;
             }
             continue;
         }
 
-        // Regular text chunk
         if (part.object.get("text")) |text| {
+            try full_response.appendSlice(alloc, text.string);
+
             const chunk = try alloc.dupe(u8, text.string);
             loop.postEvent(.{
                 .ai_update = .{
@@ -234,6 +263,8 @@ fn sendGoogleAiMessageStreaming(alloc: std.mem.Allocator, config: *const GoogleA
             });
         }
     }
+
+    return try full_response.toOwnedSlice(alloc);
 }
 
 pub const AiUpdateKind = enum {
@@ -241,6 +272,16 @@ pub const AiUpdateKind = enum {
     message_completed,
     error_occurred,
     tool_call,
+};
+
+pub const AiUpdateResult = union(enum) {
+    none: void,
+    append_chunk: struct { text: []const u8, is_first: bool },
+    set_loading: bool,
+    append_error: []const u8,
+    append_tool_status: []const u8,
+    send_telegram: struct { chat_id: i64, text: []const u8 },
+    post_tool_result: struct { success: bool, message: []const u8 },
 };
 
 pub const ToolCall = struct {
@@ -299,6 +340,17 @@ pub const AiQueue = struct {
     }
 };
 
+pub const MessageRole = enum {
+    user,
+    model,
+    tool,
+};
+
+pub const ConversationMessage = struct {
+    role: MessageRole,
+    content: []const u8,
+};
+
 pub fn AiThreadContext(comptime Event: type) type {
     return struct {
         config: *Config,
@@ -311,10 +363,10 @@ pub fn AiThreadContext(comptime Event: type) type {
 pub fn aiAgentLoop(ctx: anytype) void {
     std.log.info("AI agent thread started", .{});
 
-    var conversation_history: std.ArrayList([]const u8) = .empty;
+    var conversation_history: std.ArrayList(ConversationMessage) = .empty;
     defer {
         for (conversation_history.items) |item| {
-            ctx.alloc.free(item);
+            ctx.alloc.free(item.content);
         }
         conversation_history.deinit(ctx.alloc);
     }
@@ -341,14 +393,13 @@ pub fn aiAgentLoop(ctx: anytype) void {
                             ctx.alloc.free(result.message);
                             continue;
                         };
-
                     ctx.alloc.free(result.message);
-                    conversation_history.append(ctx.alloc, result_text) catch {
+
+                    conversation_history.append(ctx.alloc, .{ .role = .tool, .content = result_text }) catch {
                         ctx.alloc.free(result_text);
                         continue;
                     };
 
-                    // Post the tool result as a message chunk so user can see it
                     const result_display = ctx.alloc.dupe(u8, result_text) catch continue;
                     ctx.loop.postEvent(.{
                         .ai_update = .{
@@ -365,19 +416,20 @@ pub fn aiAgentLoop(ctx: anytype) void {
                         },
                     });
 
-                    std.log.info("Tool result added to conversation history, waiting for user input", .{});
+                    std.log.info("Tool result added to conversation history", .{});
                 },
                 .send_message => |msg| {
                     const prompt_copy = ctx.alloc.dupe(u8, msg.prompt) catch {
                         ctx.alloc.free(msg.prompt);
                         continue;
                     };
-                    conversation_history.append(ctx.alloc, prompt_copy) catch {
+                    conversation_history.append(ctx.alloc, .{ .role = .user, .content = prompt_copy }) catch {
                         ctx.alloc.free(prompt_copy);
                         ctx.alloc.free(msg.prompt);
                         continue;
                     };
-                    sendMessageStreaming(ctx.alloc, ctx.config, msg.prompt, ctx.loop) catch |err| {
+
+                    const ai_response = sendMessageStreaming(ctx.alloc, ctx.config, conversation_history.items, ctx.loop) catch |err| {
                         const error_msg = std.fmt.allocPrint(ctx.alloc, "Error - {any}", .{err}) catch {
                             std.log.err("Failed to allocate error message", .{});
                             ctx.alloc.free(msg.prompt);
@@ -391,6 +443,10 @@ pub fn aiAgentLoop(ctx: anytype) void {
                         });
                         ctx.alloc.free(msg.prompt);
                         continue;
+                    };
+
+                    conversation_history.append(ctx.alloc, .{ .role = .model, .content = ai_response }) catch {
+                        ctx.alloc.free(ai_response);
                     };
 
                     const completed_msg = ctx.alloc.dupe(u8, "") catch {
@@ -410,4 +466,57 @@ pub fn aiAgentLoop(ctx: anytype) void {
             std.Thread.yield() catch {};
         }
     }
+}
+
+pub const ChatInfo = struct {
+    id: i64,
+    title: []const u8,
+};
+
+pub fn handleAiUpdate(
+    alloc: std.mem.Allocator,
+    update: AiUpdate,
+    llm_messages: []const []const u8,
+    chats: []const ChatInfo,
+) ![]AiUpdateResult {
+    var results: std.ArrayList(AiUpdateResult) = .empty;
+    errdefer results.deinit(alloc);
+
+    switch (update.kind) {
+        .message_chunk => {
+            const is_first = llm_messages.len == 0 or
+                (llm_messages.len > 0 and !std.mem.startsWith(u8, llm_messages[llm_messages.len - 1], "AI:"));
+            try results.append(alloc, .{ .append_chunk = .{ .text = update.data, .is_first = is_first } });
+        },
+        .message_completed => {
+            try results.append(alloc, .{ .set_loading = false });
+        },
+        .error_occurred => {
+            try results.append(alloc, .{ .set_loading = false });
+            try results.append(alloc, .{ .append_error = update.data });
+        },
+        .tool_call => {
+            const tool = update.tool_call orelse return try results.toOwnedSlice(alloc);
+
+            try results.append(alloc, .{ .append_tool_status = tool.chat_name });
+
+            const found_chat_id = findChatByName(chats, tool.chat_name);
+
+            if (found_chat_id) |chat_id| {
+                try results.append(alloc, .{ .send_telegram = .{ .chat_id = chat_id, .text = tool.message_text } });
+                try results.append(alloc, .{ .post_tool_result = .{ .success = true, .message = tool.chat_name } });
+            } else {
+                try results.append(alloc, .{ .post_tool_result = .{ .success = false, .message = tool.chat_name } });
+            }
+        },
+    }
+
+    return try results.toOwnedSlice(alloc);
+}
+
+fn findChatByName(chats: []const ChatInfo, name: []const u8) ?i64 {
+    for (chats) |chat| {
+        if (std.mem.eql(u8, chat.title, name)) return chat.id;
+    }
+    return null;
 }
