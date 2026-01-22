@@ -106,11 +106,6 @@ pub const InputMode = enum {
     chat_list,
 };
 
-pub const RightPanelMode = enum {
-    llm,
-    logs,
-};
-
 pub const AppState = struct {
     vx: *vaxis.Vaxis,
     tty: *vaxis.Tty,
@@ -120,10 +115,8 @@ pub const AppState = struct {
     chat_messages_cache: *std.AutoHashMap(i64, std.ArrayList(telegram.Message)),
     loading_messages: *bool,
     active_mode: *InputMode,
-    right_panel_mode: *RightPanelMode,
     llm_messages: *std.ArrayList([]const u8),
     llm_loading: *bool,
-    log_messages: *std.ArrayList([]const u8),
     keybindings: *keybindings.KeyBindings,
     keymap: *keybindings.ModeKeymap,
     telegram_queue: *telegram.TelegramQueue,
@@ -386,9 +379,8 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
         .x_off = 2,
         .y_off = 1,
     });
-    const panel_title = if (state.right_panel_mode.* == .llm) "AI Assistant" else "Logs";
     _ = llm_title.printSegment(.{
-        .text = panel_title,
+        .text = "AI Assistant",
         .style = .{ .bold = true, .fg = .{ .index = 5 } }, // Magenta
     }, .{});
 
@@ -402,31 +394,24 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
 
     state.llm_text_buffer.clear(alloc);
 
-    if (state.right_panel_mode.* == .llm) {
-        var char_count: usize = 0;
-        const panel_width = if (llm_chat_width > 6) llm_chat_width - 6 else 1;
+    var char_count: usize = 0;
+    const panel_width = if (llm_chat_width > 6) llm_chat_width - 6 else 1;
 
-        for (state.llm_messages.items) |msg| {
-            const wrapped = wrapText(render_alloc, msg, panel_width) catch continue;
-            const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{wrapped}) catch continue;
-            char_count += display_text.len;
-            state.llm_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
-        }
+    for (state.llm_messages.items) |msg| {
+        const wrapped = wrapText(render_alloc, msg, panel_width) catch continue;
+        const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{wrapped}) catch continue;
+        char_count += display_text.len;
+        state.llm_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
+    }
 
-        if (state.llm_loading.*) {
-            const loading_text = "\nLoading...";
-            try state.llm_text_buffer.append(alloc, .{ .bytes = loading_text });
-            try state.llm_text_buffer.updateStyle(alloc, .{
-                .begin = char_count,
-                .end = char_count + loading_text.len,
-                .style = .{ .italic = true, .fg = .{ .index = 3 } },
-            });
-        }
-    } else {
-        for (state.log_messages.items) |msg| {
-            const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{msg}) catch continue;
-            state.llm_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
-        }
+    if (state.llm_loading.*) {
+        const loading_text = "\nLoading...";
+        try state.llm_text_buffer.append(alloc, .{ .bytes = loading_text });
+        try state.llm_text_buffer.updateStyle(alloc, .{
+            .begin = char_count,
+            .end = char_count + loading_text.len,
+            .style = .{ .italic = true, .fg = .{ .index = 3 } },
+        });
     }
 
     state.llm_text_view.draw(llm_messages_window, state.llm_text_buffer.*);

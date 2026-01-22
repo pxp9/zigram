@@ -15,7 +15,6 @@ pub const KeyAction = enum {
     send_message,
     delete_char,
     reload_config,
-    toggle_right_panel,
     none,
 };
 
@@ -45,7 +44,6 @@ pub const KeyBindings = struct {
     select: []const u8,
     backspace: []const u8,
     reload_config: []const u8,
-    toggle_right_panel: []const u8,
     allocated: bool = false,
 
     pub fn deinit(self: *KeyBindings, alloc: std.mem.Allocator) void {
@@ -62,7 +60,6 @@ pub const KeyBindings = struct {
             alloc.free(self.select);
             alloc.free(self.backspace);
             alloc.free(self.reload_config);
-            alloc.free(self.toggle_right_panel);
         }
     }
 };
@@ -79,7 +76,6 @@ pub const DEFAULT_SCROLL_DOWN = "down";
 pub const DEFAULT_SELECT = "enter";
 pub const DEFAULT_BACKSPACE = "backspace";
 pub const DEFAULT_RELOAD_CONFIG = "ctrl+r";
-pub const DEFAULT_TOGGLE_RIGHT_PANEL = "ctrl+l";
 
 pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
     const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
@@ -101,7 +97,6 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
             .select = DEFAULT_SELECT,
             .backspace = DEFAULT_BACKSPACE,
             .reload_config = DEFAULT_RELOAD_CONFIG,
-            .toggle_right_panel = DEFAULT_TOGGLE_RIGHT_PANEL,
             .allocated = false,
         };
     };
@@ -110,10 +105,24 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
     const content = try file.readToEndAlloc(alloc, 1024 * 1024);
     defer alloc.free(content);
 
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, content, .{}) catch |err| {
-        std.log.err("Failed to parse config file: {s}", .{@errorName(err)});
-        std.log.err("Please check ~/.config/zigram/zigram.json for JSON syntax errors", .{});
-        return err;
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, content, .{}) catch {
+        std.log.err("Failed to parse config file. Please check ~/.config/zigram/zigram.json for JSON syntax errors", .{});
+        std.log.err("Using default keybindings", .{});
+        return KeyBindings{
+            .quit = DEFAULT_QUIT,
+            .quit_ctrl = DEFAULT_QUIT_CTRL,
+            .switch_mode = DEFAULT_SWITCH_MODE,
+            .navigate_up = DEFAULT_NAVIGATE_UP,
+            .navigate_up_alt = DEFAULT_NAVIGATE_UP_ALT,
+            .navigate_down = DEFAULT_NAVIGATE_DOWN,
+            .navigate_down_alt = DEFAULT_NAVIGATE_DOWN_ALT,
+            .scroll_up = DEFAULT_SCROLL_UP,
+            .scroll_down = DEFAULT_SCROLL_DOWN,
+            .select = DEFAULT_SELECT,
+            .backspace = DEFAULT_BACKSPACE,
+            .reload_config = DEFAULT_RELOAD_CONFIG,
+            .allocated = false,
+        };
     };
     defer parsed.deinit();
 
@@ -130,7 +139,6 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
         .select = DEFAULT_SELECT,
         .backspace = DEFAULT_BACKSPACE,
         .reload_config = DEFAULT_RELOAD_CONFIG,
-        .toggle_right_panel = DEFAULT_TOGGLE_RIGHT_PANEL,
         .allocated = true,
     };
 
@@ -196,11 +204,6 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
         } else {
             keybindings.reload_config = try alloc.dupe(u8, DEFAULT_RELOAD_CONFIG);
         }
-        if (kb_obj.object.get("toggle_right_panel")) |v| {
-            keybindings.toggle_right_panel = try alloc.dupe(u8, v.string);
-        } else {
-            keybindings.toggle_right_panel = try alloc.dupe(u8, DEFAULT_TOGGLE_RIGHT_PANEL);
-        }
     } else {
         keybindings.quit = try alloc.dupe(u8, DEFAULT_QUIT);
         keybindings.quit_ctrl = try alloc.dupe(u8, DEFAULT_QUIT_CTRL);
@@ -214,7 +217,6 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
         keybindings.select = try alloc.dupe(u8, DEFAULT_SELECT);
         keybindings.backspace = try alloc.dupe(u8, DEFAULT_BACKSPACE);
         keybindings.reload_config = try alloc.dupe(u8, DEFAULT_RELOAD_CONFIG);
-        keybindings.toggle_right_panel = try alloc.dupe(u8, DEFAULT_TOGGLE_RIGHT_PANEL);
     }
 
     return keybindings;
@@ -237,10 +239,13 @@ pub fn loadAppConfig(alloc: std.mem.Allocator) !AppConfig {
     const content = try file.readToEndAlloc(alloc, 1024 * 1024);
     defer alloc.free(content);
 
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, content, .{}) catch |err| {
-        std.log.err("Failed to parse config file: {s}", .{@errorName(err)});
-        std.log.err("Please check ~/.config/zigram/zigram.json for JSON syntax errors", .{});
-        return err;
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, content, .{}) catch {
+        std.log.err("Failed to parse config file. Please check ~/.config/zigram/zigram.json for JSON syntax errors", .{});
+        std.log.err("Using default app config", .{});
+        return AppConfig{
+            .datetime_format = DEFAULT_DATETIME_FORMAT,
+            .allocated = false,
+        };
     };
     defer parsed.deinit();
 
@@ -356,7 +361,6 @@ pub fn buildModeKeymap(alloc: std.mem.Allocator, keybindings: KeyBindings) !Mode
         .{ .key = keybindings.select, .action = .select },
         .{ .key = keybindings.backspace, .action = .delete_char },
         .{ .key = keybindings.reload_config, .action = .reload_config },
-        .{ .key = keybindings.toggle_right_panel, .action = .toggle_right_panel },
     };
 
     for (global_bindings) |binding| {

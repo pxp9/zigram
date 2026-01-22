@@ -1,18 +1,19 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const google = @import("ai/google.zig");
 
-const default_system_prompt = "You are a helpful assistant integrated into a Telegram client. " ++
+pub const default_system_prompt = "You are a helpful assistant integrated into a Telegram client. " ++
     "Answer in the same language the user is using or in the language the user requests. " ++
     "Be concise and helpful.";
 
-pub const GoogleAiConfig = struct {
+pub const ProviderConfig = struct {
     api_key: []const u8,
-    model: []const u8 = "gemini-3-flash-preview",
-    system_prompt: []const u8 = default_system_prompt,
+    model: []const u8,
+    system_prompt: []const u8,
     allocated: bool = false,
     system_prompt_allocated: bool = false,
 
-    pub fn deinit(self: *GoogleAiConfig, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *ProviderConfig, alloc: std.mem.Allocator) void {
         if (self.allocated) {
             alloc.free(self.api_key);
             alloc.free(self.model);
@@ -27,12 +28,10 @@ pub const Provider = enum {
 
 pub const Config = struct {
     provider: Provider,
-    google_ai: ?GoogleAiConfig = null,
+    provider_config: ProviderConfig,
 
     pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
-        if (self.google_ai) |*google| {
-            google.deinit(alloc);
-        }
+        self.provider_config.deinit(alloc);
     }
 };
 
@@ -61,21 +60,10 @@ pub fn loadConfig(alloc: std.mem.Allocator) !Config {
         const provider_str = ai_obj.object.get("provider") orelse return error.NoProvider;
 
         if (std.mem.eql(u8, provider_str.string, "google_ai")) {
-            const google_config = ai_obj.object.get("google_ai") orelse return error.NoGoogleAiConfig;
-            const api_key = google_config.object.get("api_key") orelse return error.NoApiKey;
-            const model_name = if (google_config.object.get("model")) |m| m.string else "gemini-3-flash-preview";
-            const has_custom_prompt = google_config.object.get("system_prompt") != null;
-            const system_prompt = if (google_config.object.get("system_prompt")) |sp| try alloc.dupe(u8, sp.string) else default_system_prompt;
-
+            const provider_config_json = ai_obj.object.get("google_ai") orelse return error.NoGoogleAiConfig;
             return Config{
                 .provider = .google_ai,
-                .google_ai = GoogleAiConfig{
-                    .api_key = try alloc.dupe(u8, api_key.string),
-                    .model = try alloc.dupe(u8, model_name),
-                    .system_prompt = system_prompt,
-                    .allocated = true,
-                    .system_prompt_allocated = has_custom_prompt,
-                },
+                .provider_config = try loadProviderConfig(alloc, provider_config_json, google.default_model),
             };
         }
     }
@@ -83,202 +71,31 @@ pub fn loadConfig(alloc: std.mem.Allocator) !Config {
     return error.NoAiConfig;
 }
 
-pub fn listModels(alloc: std.mem.Allocator, config: *const Config) ![]const u8 {
-    return switch (config.provider) {
-        .google_ai => try listGoogleAiModels(alloc, &config.google_ai.?),
+fn loadProviderConfig(alloc: std.mem.Allocator, config_json: std.json.Value, default_model: []const u8) !ProviderConfig {
+    const api_key = config_json.object.get("api_key") orelse return error.NoApiKey;
+    const model_name = if (config_json.object.get("model")) |m| m.string else default_model;
+    const has_custom_prompt = config_json.object.get("system_prompt") != null;
+    const system_prompt = if (config_json.object.get("system_prompt")) |sp| try alloc.dupe(u8, sp.string) else default_system_prompt;
+
+    return ProviderConfig{
+        .api_key = try alloc.dupe(u8, api_key.string),
+        .model = try alloc.dupe(u8, model_name),
+        .system_prompt = system_prompt,
+        .allocated = true,
+        .system_prompt_allocated = has_custom_prompt,
     };
 }
 
-fn listGoogleAiModels(alloc: std.mem.Allocator, config: *const GoogleAiConfig) ![]const u8 {
-    var client = std.http.Client{ .allocator = alloc };
-    defer client.deinit();
-
-    const url = "https://generativelanguage.googleapis.com/v1beta/models";
-    const uri = try std.Uri.parse(url);
-
-    var allocating_writer = std.Io.Writer.Allocating.init(alloc);
-    defer allocating_writer.deinit();
-
-    const req = try client.fetch(.{
-        .location = .{ .uri = uri },
-        .method = .GET,
-        .response_writer = &allocating_writer.writer,
-        .extra_headers = &.{
-            .{ .name = "x-goog-api-key", .value = config.api_key },
-        },
-    });
-
-    const response_body = try allocating_writer.toOwnedSlice();
-
-    if (req.status != .ok) {
-        std.log.err("ListModels API request failed with status: {}", .{req.status});
-        std.log.err("Response body: {s}", .{response_body});
-        alloc.free(response_body);
-        return error.ApiRequestFailed;
-    }
-
-    return response_body;
+pub fn listModels(alloc: std.mem.Allocator, config: *const Config) ![]const u8 {
+    return switch (config.provider) {
+        .google_ai => try google.listModels(alloc, &config.provider_config),
+    };
 }
 
 pub fn sendMessageStreaming(alloc: std.mem.Allocator, config: *const Config, history: []const ConversationMessage, loop: anytype) ![]const u8 {
     return switch (config.provider) {
-        .google_ai => try sendGoogleAiMessageStreaming(alloc, &config.google_ai.?, history, loop),
+        .google_ai => try google.sendMessageStreaming(alloc, &config.provider_config, history, loop),
     };
-}
-
-fn escapeJsonString(alloc: std.mem.Allocator, input: []const u8) ![]const u8 {
-    var result: std.ArrayList(u8) = .empty;
-    defer result.deinit(alloc);
-
-    for (input) |c| {
-        switch (c) {
-            '"' => try result.appendSlice(alloc, "\\\""),
-            '\\' => try result.appendSlice(alloc, "\\\\"),
-            '\n' => try result.appendSlice(alloc, "\\n"),
-            '\r' => try result.appendSlice(alloc, "\\r"),
-            '\t' => try result.appendSlice(alloc, "\\t"),
-            '\x08' => try result.appendSlice(alloc, "\\b"),
-            '\x0C' => try result.appendSlice(alloc, "\\f"),
-            else => try result.append(alloc, c),
-        }
-    }
-
-    return try result.toOwnedSlice(alloc);
-}
-
-fn buildContentsJson(alloc: std.mem.Allocator, history: []const ConversationMessage) ![]const u8 {
-    var result: std.ArrayList(u8) = .empty;
-    defer result.deinit(alloc);
-
-    for (history, 0..) |msg, i| {
-        if (i > 0) try result.appendSlice(alloc, ",");
-
-        const role = switch (msg.role) {
-            .user, .tool => "user",
-            .model => "model",
-        };
-        const escaped = try escapeJsonString(alloc, msg.content);
-        defer alloc.free(escaped);
-
-        const content = try std.fmt.allocPrint(alloc, "{{\"role\":\"{s}\",\"parts\":[{{\"text\":\"{s}\"}}]}}", .{ role, escaped });
-        defer alloc.free(content);
-
-        try result.appendSlice(alloc, content);
-    }
-
-    return try result.toOwnedSlice(alloc);
-}
-
-fn sendGoogleAiMessageStreaming(alloc: std.mem.Allocator, config: *const GoogleAiConfig, history: []const ConversationMessage, loop: anytype) ![]const u8 {
-    var client = std.http.Client{ .allocator = alloc };
-    defer client.deinit();
-
-    const url = try std.fmt.allocPrint(alloc, "https://generativelanguage.googleapis.com/v1beta/models/{s}:streamGenerateContent?alt=sse", .{config.model});
-    defer alloc.free(url);
-
-    const contents_json = try buildContentsJson(alloc, history);
-    defer alloc.free(contents_json);
-
-    const escaped_system_prompt = try escapeJsonString(alloc, config.system_prompt);
-    defer alloc.free(escaped_system_prompt);
-
-    const request_body = try std.fmt.allocPrint(alloc,
-        \\{{"systemInstruction":{{"parts":[{{"text":"{s}"}}]}},"contents":[{s}],"tools":[{{"functionDeclarations":[{{"name":"send_telegram_message","description":"Send a message to a Telegram chat by chat name","parameters":{{"type":"object","properties":{{"chat_name":{{"type":"string","description":"The name/title of the chat to send the message to"}},"message_text":{{"type":"string","description":"The text content of the message to send"}}}},"required":["chat_name","message_text"]}}}}]}}]}}
-    , .{ escaped_system_prompt, contents_json });
-    defer alloc.free(request_body);
-
-    const uri = try std.Uri.parse(url);
-
-    var allocating_writer = std.Io.Writer.Allocating.init(alloc);
-    defer allocating_writer.deinit();
-
-    const req = try client.fetch(.{
-        .location = .{ .uri = uri },
-        .method = .POST,
-        .payload = request_body,
-        .response_writer = &allocating_writer.writer,
-        .extra_headers = &.{
-            .{ .name = "Content-Type", .value = "application/json" },
-            .{ .name = "x-goog-api-key", .value = config.api_key },
-        },
-    });
-
-    const response_body = try allocating_writer.toOwnedSlice();
-    defer alloc.free(response_body);
-
-    if (req.status != .ok) {
-        std.log.err("AI API request failed with status: {}", .{req.status});
-        std.log.err("Response body: {s}", .{response_body});
-        return error.ApiRequestFailed;
-    }
-
-    var full_response: std.ArrayList(u8) = .empty;
-    errdefer full_response.deinit(alloc);
-
-    var line_iter = std.mem.splitSequence(u8, response_body, "\n");
-    while (line_iter.next()) |line| {
-        if (!std.mem.startsWith(u8, line, "data: ")) continue;
-        const json_data = line[6..];
-
-        if (std.mem.eql(u8, json_data, "[DONE]")) break;
-
-        const parsed = std.json.parseFromSlice(std.json.Value, alloc, json_data, .{}) catch continue;
-        defer parsed.deinit();
-
-        const root = parsed.value;
-        const candidates = root.object.get("candidates") orelse continue;
-        if (candidates.array.items.len == 0) continue;
-
-        const candidate = candidates.array.items[0];
-        const content = candidate.object.get("content") orelse continue;
-        const parts = content.object.get("parts") orelse continue;
-        if (parts.array.items.len == 0) continue;
-
-        const part = parts.array.items[0];
-
-        if (part.object.get("functionCall")) |func_call| {
-            const func_name = func_call.object.get("name") orelse continue;
-            if (std.mem.eql(u8, func_name.string, "send_telegram_message")) {
-                const args = func_call.object.get("args") orelse continue;
-                const chat_name = args.object.get("chat_name") orelse continue;
-                const message_text = args.object.get("message_text") orelse continue;
-
-                const tool_call = ToolCall{
-                    .tool_name = try alloc.dupe(u8, func_name.string),
-                    .chat_name = try alloc.dupe(u8, chat_name.string),
-                    .message_text = try alloc.dupe(u8, message_text.string),
-                };
-
-                const tool_response = try std.fmt.allocPrint(alloc, "[Tool call: {s}]", .{func_name.string});
-                try full_response.appendSlice(alloc, tool_response);
-                alloc.free(tool_response);
-
-                loop.postEvent(.{
-                    .ai_update = .{
-                        .kind = .tool_call,
-                        .data = try alloc.dupe(u8, ""),
-                        .tool_call = tool_call,
-                    },
-                });
-                break;
-            }
-            continue;
-        }
-
-        if (part.object.get("text")) |text| {
-            try full_response.appendSlice(alloc, text.string);
-
-            const chunk = try alloc.dupe(u8, text.string);
-            loop.postEvent(.{
-                .ai_update = .{
-                    .kind = .message_chunk,
-                    .data = chunk,
-                },
-            });
-        }
-    }
-
-    return try full_response.toOwnedSlice(alloc);
 }
 
 pub const AiUpdateKind = enum {
@@ -386,100 +203,103 @@ pub fn aiAgentLoop(ctx: anytype) void {
     }
 
     while (true) {
-        const request = ctx.request_queue.getRequest();
-
-        if (request) |req| {
-            switch (req) {
-                .shutdown => {
-                    std.log.info("AI agent thread shutting down", .{});
-                    break;
-                },
-                .tool_result => |result| {
-                    const result_text = if (result.success)
-                        std.fmt.allocPrint(ctx.alloc, "Tool execution successful: {s}", .{result.message}) catch {
-                            std.log.err("Failed to format tool result", .{});
-                            ctx.alloc.free(result.message);
-                            continue;
-                        }
-                    else
-                        std.fmt.allocPrint(ctx.alloc, "Tool execution failed: {s}", .{result.message}) catch {
-                            std.log.err("Failed to format tool result", .{});
-                            ctx.alloc.free(result.message);
-                            continue;
-                        };
-                    ctx.alloc.free(result.message);
-
-                    conversation_history.append(ctx.alloc, .{ .role = .tool, .content = result_text }) catch {
-                        ctx.alloc.free(result_text);
-                        continue;
-                    };
-
-                    const result_display = ctx.alloc.dupe(u8, result_text) catch continue;
-                    ctx.loop.postEvent(.{
-                        .ai_update = .{
-                            .kind = .message_chunk,
-                            .data = result_display,
-                        },
-                    });
-
-                    const completed_msg = ctx.alloc.dupe(u8, "") catch continue;
-                    ctx.loop.postEvent(.{
-                        .ai_update = .{
-                            .kind = .message_completed,
-                            .data = completed_msg,
-                        },
-                    });
-
-                    std.log.info("Tool result added to conversation history", .{});
-                },
-                .send_message => |msg| {
-                    const prompt_copy = ctx.alloc.dupe(u8, msg.prompt) catch {
-                        ctx.alloc.free(msg.prompt);
-                        continue;
-                    };
-                    conversation_history.append(ctx.alloc, .{ .role = .user, .content = prompt_copy }) catch {
-                        ctx.alloc.free(prompt_copy);
-                        ctx.alloc.free(msg.prompt);
-                        continue;
-                    };
-
-                    const ai_response = sendMessageStreaming(ctx.alloc, ctx.config, conversation_history.items, ctx.loop) catch |err| {
-                        const error_msg = std.fmt.allocPrint(ctx.alloc, "Error - {any}", .{err}) catch {
-                            std.log.err("Failed to allocate error message", .{});
-                            ctx.alloc.free(msg.prompt);
-                            continue;
-                        };
-                        ctx.loop.postEvent(.{
-                            .ai_update = .{
-                                .kind = .error_occurred,
-                                .data = error_msg,
-                            },
-                        });
-                        ctx.alloc.free(msg.prompt);
-                        continue;
-                    };
-
-                    conversation_history.append(ctx.alloc, .{ .role = .model, .content = ai_response }) catch {
-                        ctx.alloc.free(ai_response);
-                    };
-
-                    const completed_msg = ctx.alloc.dupe(u8, "") catch {
-                        ctx.alloc.free(msg.prompt);
-                        continue;
-                    };
-                    ctx.loop.postEvent(.{
-                        .ai_update = .{
-                            .kind = .message_completed,
-                            .data = completed_msg,
-                        },
-                    });
-                    ctx.alloc.free(msg.prompt);
-                },
-            }
-        } else {
+        const req = ctx.request_queue.getRequest() orelse {
             std.Thread.yield() catch {};
+            continue;
+        };
+
+        switch (req) {
+            .shutdown => {
+                std.log.info("AI agent thread shutting down", .{});
+                break;
+            },
+            .tool_result => |result| handleToolResult(ctx, &conversation_history, result),
+            .send_message => |msg| handleSendMessage(ctx, &conversation_history, msg),
         }
     }
+}
+
+fn handleToolResult(ctx: anytype, conversation_history: *std.ArrayList(ConversationMessage), result: anytype) void {
+    const result_text = if (result.success)
+        std.fmt.allocPrint(ctx.alloc, "Tool execution successful: {s}", .{result.message}) catch {
+            std.log.err("Failed to format tool result", .{});
+            ctx.alloc.free(result.message);
+            return;
+        }
+    else
+        std.fmt.allocPrint(ctx.alloc, "Tool execution failed: {s}", .{result.message}) catch {
+            std.log.err("Failed to format tool result", .{});
+            ctx.alloc.free(result.message);
+            return;
+        };
+    ctx.alloc.free(result.message);
+
+    conversation_history.append(ctx.alloc, .{ .role = .tool, .content = result_text }) catch {
+        ctx.alloc.free(result_text);
+        return;
+    };
+
+    const result_display = ctx.alloc.dupe(u8, result_text) catch return;
+    ctx.loop.postEvent(.{
+        .ai_update = .{
+            .kind = .message_chunk,
+            .data = result_display,
+        },
+    });
+
+    const completed_msg = ctx.alloc.dupe(u8, "") catch return;
+    ctx.loop.postEvent(.{
+        .ai_update = .{
+            .kind = .message_completed,
+            .data = completed_msg,
+        },
+    });
+
+    std.log.info("Tool result added to conversation history", .{});
+}
+
+fn handleSendMessage(ctx: anytype, conversation_history: *std.ArrayList(ConversationMessage), msg: anytype) void {
+    const prompt_copy = ctx.alloc.dupe(u8, msg.prompt) catch {
+        ctx.alloc.free(msg.prompt);
+        return;
+    };
+    conversation_history.append(ctx.alloc, .{ .role = .user, .content = prompt_copy }) catch {
+        ctx.alloc.free(prompt_copy);
+        ctx.alloc.free(msg.prompt);
+        return;
+    };
+
+    const ai_response = sendMessageStreaming(ctx.alloc, ctx.config, conversation_history.items, ctx.loop) catch |err| {
+        const error_msg = std.fmt.allocPrint(ctx.alloc, "Error - {any}", .{err}) catch {
+            std.log.err("Failed to allocate error message", .{});
+            ctx.alloc.free(msg.prompt);
+            return;
+        };
+        ctx.loop.postEvent(.{
+            .ai_update = .{
+                .kind = .error_occurred,
+                .data = error_msg,
+            },
+        });
+        ctx.alloc.free(msg.prompt);
+        return;
+    };
+
+    conversation_history.append(ctx.alloc, .{ .role = .model, .content = ai_response }) catch {
+        ctx.alloc.free(ai_response);
+    };
+
+    const completed_msg = ctx.alloc.dupe(u8, "") catch {
+        ctx.alloc.free(msg.prompt);
+        return;
+    };
+    ctx.loop.postEvent(.{
+        .ai_update = .{
+            .kind = .message_completed,
+            .data = completed_msg,
+        },
+    });
+    ctx.alloc.free(msg.prompt);
 }
 
 pub const ChatInfo = struct {

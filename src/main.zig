@@ -12,8 +12,6 @@ const KeyAction = keybindings.KeyAction;
 const KeyBindings = keybindings.KeyBindings;
 
 var global_log_file: std.fs.File = undefined;
-var global_log_messages: ?*std.ArrayList([]const u8) = null;
-var global_allocator: ?std.mem.Allocator = null;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -38,15 +36,6 @@ fn logToFile(
     const formatted = std.fmt.bufPrint(&buf, format, args) catch return;
     global_log_file.writeAll(formatted) catch return;
     global_log_file.writeAll("\n") catch return;
-
-    if (global_log_messages) |log_msgs| {
-        if (global_allocator) |alloc| {
-            const full_msg = std.fmt.allocPrint(alloc, "{s}{s}", .{ msg, formatted }) catch return;
-            log_msgs.append(alloc, full_msg) catch {
-                alloc.free(full_msg);
-            };
-        }
-    }
 }
 
 const Event = union(enum) {
@@ -57,7 +46,6 @@ const Event = union(enum) {
 };
 
 const InputMode = render.InputMode;
-const RightPanelMode = render.RightPanelMode;
 const AppState = render.AppState;
 const MAX_MESSAGE_LENGTH = render.MAX_MESSAGE_LENGTH;
 
@@ -94,7 +82,14 @@ pub fn main() !void {
 
     var ai_config = ai.loadConfig(alloc) catch |err| blk: {
         std.log.warn("Failed to load AI config: {any}. AI assistant will be disabled.", .{err});
-        break :blk ai.Config{ .provider = .google_ai };
+        break :blk ai.Config{
+            .provider = .google_ai,
+            .provider_config = .{
+                .api_key = "",
+                .model = "",
+                .system_prompt = ai.default_system_prompt,
+            },
+        };
     };
     defer ai_config.deinit(alloc);
 
@@ -133,17 +128,6 @@ pub fn main() !void {
     global_log_file = try std.fs.createFileAbsolute(log_file_path, .{ .truncate = false });
     defer global_log_file.close();
     try global_log_file.seekFromEnd(0); // Append to end
-
-    var log_messages: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (log_messages.items) |msg| {
-            alloc.free(msg);
-        }
-        log_messages.deinit(alloc);
-    }
-
-    global_log_messages = &log_messages;
-    global_allocator = alloc;
 
     std.log.info("Zigram started", .{});
     std.log.info("Log file: {s}", .{log_file_path});
@@ -191,7 +175,6 @@ pub fn main() !void {
     var llm_loading: bool = false;
 
     var active_mode: InputMode = .chat;
-    var right_panel_mode: RightPanelMode = .llm;
 
     var chat_text_view: vaxis.widgets.TextView = .{};
     var chat_text_buffer: vaxis.widgets.TextView.Buffer = .{};
@@ -228,10 +211,8 @@ pub fn main() !void {
             .chat_messages_cache = &chat_messages_cache,
             .loading_messages = &loading_messages,
             .active_mode = &active_mode,
-            .right_panel_mode = &right_panel_mode,
             .llm_messages = &llm_messages,
             .llm_loading = &llm_loading,
-            .log_messages = &log_messages,
             .keybindings = &kb,
             .keymap = &keymap,
             .telegram_queue = &telegram_queue,
@@ -577,7 +558,7 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
             const user_msg = try std.fmt.allocPrint(alloc, "You: {s}", .{input_text});
             try state.llm_messages.append(alloc, user_msg);
 
-            if (state.ai_config.google_ai == null) {
+            if (state.ai_config.provider_config.api_key.len == 0) {
                 const error_msg = try alloc.dupe(u8, "AI: Error - No API key configured");
                 try state.llm_messages.append(alloc, error_msg);
                 alloc.free(input_text);
@@ -752,13 +733,6 @@ fn handle_key_action(alloc: std.mem.Allocator, state: *AppState, action: keybind
         },
         .select => try handle_select_action(alloc, state),
         .reload_config => try handle_reload_config(alloc, state),
-        .toggle_right_panel => {
-            state.right_panel_mode.* = switch (state.right_panel_mode.*) {
-                .llm => .logs,
-                .logs => .llm,
-            };
-            std.log.info("Toggled right panel to {s}", .{@tagName(state.right_panel_mode.*)});
-        },
         .scroll_up, .scroll_down, .delete_char, .send_message, .none => {},
     }
     return 1;

@@ -62,8 +62,7 @@ You can customize keybindings by creating or editing
     "navigate_down_alt": "down",
     "select": "enter",
     "backspace": "backspace",
-    "reload_config": "ctrl+r",
-    "toggle_right_panel": "ctrl+t"
+    "reload_config": "ctrl+r"
   }
 }
 ```
@@ -79,7 +78,6 @@ You can customize keybindings by creating or editing
 | Select | `Enter` | Select chat or send message |
 | Delete Character | `Backspace` | Delete character in input field |
 | Reload Config | `Ctrl+R` | Reload keybindings from config file |
-| Toggle Right Panel | `Ctrl+T` | Toggle between AI Assistant and Logs |
 | Scroll Messages | `Page Up/Down` | Scroll through chat messages (when input is empty) |
 | Jump to Top/Bottom | `Home/End` | Jump to first/last message (when input is empty) |
 
@@ -143,25 +141,11 @@ The interface is divided into three panels:
 
 - **Left Panel**: Chat list - shows your recent conversations
 - **Center Panel**: Main chat window - displays messages from the selected chat
-- **Right Panel**: Toggles between:
-  - **AI Assistant**: Chat with an AI (placeholder)
-  - **Logs**: Real-time application logs
+- **Right Panel**: AI Assistant - chat with an AI
 
 ## Log File
 
-Zigram writes logs to:
-
-    ~/.local/share/zigram/zigram.log
-
-Logs include:
-
-- Application startup/shutdown events
-- Telegram operations (loading chats, sending messages)
-- Configuration reloads
-- Error messages
-
-You can view logs in real-time by toggling the right panel to "Logs" mode using
-`Ctrl+L`.
+Zigram writes logs to `~/.local/share/zigram/zigram.log`.
 
 ## Building
 
