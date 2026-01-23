@@ -269,33 +269,4 @@ pub fn build(b: *std.Build) void {
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
 
-    // TDLib Authentication Example executable
-    const tdlib_example = b.addExecutable(.{
-        .name = "tdlib_auth_example",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tdlib_auth_example.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-
-    // Download and setup TDLib
-    setupTDLib(b, target, optimize, tdlib_example) catch |err| {
-        std.debug.print("Warning: Could not setup TDLib: {}\n", .{err});
-        std.debug.print("TDLib will not be available. Install it manually.\n", .{});
-    };
-
-    // Install the TDLib example
-    b.installArtifact(tdlib_example);
-
-    // Create a run step for the TDLib example
-    const tdlib_run_step = b.step("run-tdlib", "Run the TDLib authentication example");
-    const tdlib_run_cmd = b.addRunArtifact(tdlib_example);
-    tdlib_run_step.dependOn(&tdlib_run_cmd.step);
-    tdlib_run_cmd.step.dependOn(b.getInstallStep());
-
-    // Allow passing args to the TDLib example
-    if (b.args) |args| {
-        tdlib_run_cmd.addArgs(args);
-    }
 }
