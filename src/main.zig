@@ -41,6 +41,9 @@ fn logToFile(
 const Event = union(enum) {
     key_press: vaxis.Key,
     winsize: vaxis.Winsize,
+    focus_in,
+    focus_out,
+    mouse: vaxis.Mouse,
     telegram_update: telegram.TelegramUpdate,
     ai_update: ai.AiUpdate,
 };
@@ -107,6 +110,8 @@ pub fn main() !void {
     try loop.init();
     try loop.start();
     defer loop.stop();
+
+    try vx.setMouseMode(tty.writer(), true);
 
     var llm_messages: std.ArrayList([]const u8) = .empty;
     defer {
@@ -241,6 +246,12 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
         .winsize => |ws| {
             try state.vx.resize(alloc, state.tty.writer(), ws);
         },
+        .focus_in => {
+            const ws = vaxis.Tty.getWinsize(state.tty.fd) catch return 1;
+            try state.vx.resize(alloc, state.tty.writer(), ws);
+        },
+        .focus_out => {},
+        .mouse => {},
         .telegram_update => |update| {
             defer alloc.free(update.data);
 

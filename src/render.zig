@@ -44,57 +44,106 @@ fn formatTimestamp(alloc: std.mem.Allocator, timestamp: i64, format: []const u8)
     return try alloc.dupe(u8, buf[0..len]);
 }
 
-fn wrapText(alloc: std.mem.Allocator, text: []const u8, width: usize) ![]const u8 {
+fn stripVariationSelectors(alloc: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < text.len) {
+        // VS16 (U+FE0F) = 0xEF 0xB8 0x8F (emoji presentation)
+        // VS15 (U+FE0E) = 0xEF 0xB8 0x8E (text presentation)
+        if (i + 2 < text.len and text[i] == 0xEF and text[i + 1] == 0xB8 and (text[i + 2] == 0x8F or text[i + 2] == 0x8E)) {
+            i += 3;
+            continue;
+        }
+        try result.append(alloc, text[i]);
+        i += 1;
+    }
+
+    return try result.toOwnedSlice(alloc);
+}
+
+fn displayWidthWithMethod(text: []const u8, method: vaxis.gwidth.Method) usize {
+    return vaxis.gwidth.gwidth(text, method);
+}
+
+fn truncateToDisplayWidth(alloc: std.mem.Allocator, text: []const u8, max_width: usize, method: vaxis.gwidth.Method) ![]const u8 {
+    const text_width = displayWidthWithMethod(text, method);
+    if (text_width <= max_width) {
+        return try alloc.dupe(u8, text);
+    }
+
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(alloc);
+
+    var current_width: usize = 0;
+    var giter = vaxis.unicode.GraphemeIterator.init(text);
+    while (giter.next()) |grapheme| {
+        const grapheme_width = vaxis.gwidth.gwidth(grapheme.bytes(text), method);
+        if (current_width + grapheme_width > max_width) break;
+        try result.appendSlice(alloc, grapheme.bytes(text));
+        current_width += grapheme_width;
+    }
+
+    return try result.toOwnedSlice(alloc);
+}
+
+fn wrapText(alloc: std.mem.Allocator, text: []const u8, width: usize, method: vaxis.gwidth.Method) ![]const u8 {
     if (width == 0) return try alloc.dupe(u8, text);
 
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(alloc);
 
-    var line_start: usize = 0;
-    var last_space: ?usize = null;
-    var col: usize = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var first_line = true;
 
-    var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        const c = text[i];
-
-        if (c == '\n') {
-            try result.appendSlice(alloc, text[line_start .. i + 1]);
-            line_start = i + 1;
-            col = 0;
-            last_space = null;
-            continue;
+    while (lines.next()) |line| {
+        if (!first_line) {
+            try result.append(alloc, '\n');
         }
+        first_line = false;
 
-        if (c == ' ' or c == '\t') {
-            last_space = i;
-        }
+        if (line.len == 0) continue;
 
-        col += 1;
+        var line_col: usize = 0;
+        var line_start: usize = 0;
+        var last_space: ?usize = null;
 
-        if (col >= width) {
-            if (last_space) |space_pos| {
-                if (space_pos > line_start) {
-                    try result.appendSlice(alloc, text[line_start..space_pos]);
-                    try result.append(alloc, '\n');
-                    line_start = space_pos + 1;
-                    i = space_pos;
-                    col = 0;
-                    last_space = null;
-                    continue;
-                }
+        var giter = vaxis.unicode.GraphemeIterator.init(line);
+        while (giter.next()) |grapheme| {
+            const grapheme_bytes = grapheme.bytes(line);
+            const grapheme_width = vaxis.gwidth.gwidth(grapheme_bytes, method);
+            const grapheme_end = grapheme.start + grapheme.len;
+
+            if (grapheme_bytes.len == 1 and grapheme_bytes[0] == ' ') {
+                last_space = grapheme.start;
             }
 
-            try result.appendSlice(alloc, text[line_start..i]);
-            try result.append(alloc, '\n');
-            line_start = i;
-            col = 0;
-            last_space = null;
-        }
-    }
+            if (line_col + grapheme_width > width and line_col > 0) {
+                if (last_space) |space_pos| {
+                    if (space_pos > line_start) {
+                        try result.appendSlice(alloc, line[line_start..space_pos]);
+                        try result.append(alloc, '\n');
+                        line_start = space_pos + 1;
+                        line_col = displayWidthWithMethod(line[line_start..grapheme_end], method);
+                        last_space = null;
+                        continue;
+                    }
+                }
+                try result.appendSlice(alloc, line[line_start..grapheme.start]);
+                try result.append(alloc, '\n');
+                line_start = grapheme.start;
+                line_col = grapheme_width;
+                last_space = null;
+                continue;
+            }
 
-    if (line_start < text.len) {
-        try result.appendSlice(alloc, text[line_start..]);
+            line_col += grapheme_width;
+        }
+
+        if (line_start < line.len) {
+            try result.appendSlice(alloc, line[line_start..]);
+        }
     }
 
     return try result.toOwnedSlice(alloc);
@@ -138,6 +187,8 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
 
     const win = state.vx.window();
     win.clear();
+
+    const width_method = state.vx.caps.unicode;
 
     const width = win.width;
     const height = win.height;
@@ -237,10 +288,8 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
 
                 const max_name_width = if (chat_list_width > 6) chat_list_width - 6 else 1;
 
-                const truncated_chat = if (chat.title.len > max_name_width)
-                    chat.title[0..max_name_width]
-                else
-                    chat.title;
+                const clean_title = stripVariationSelectors(render_alloc, chat.title) catch chat.title;
+                const truncated_chat = truncateToDisplayWidth(render_alloc, clean_title, max_name_width, width_method) catch clean_title;
 
                 const chat_item = chat_list_panel.child(.{
                     .x_off = 4, // 2 (padding) + 2 (prefix width)
@@ -271,9 +320,9 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
     });
 
     if (state.chats.items.len > 0) {
-        var chat_title_buf: [128]u8 = undefined;
         const current_chat_name = state.chats.items[state.selected_chat_idx.*].title;
-        const chat_title_text = try std.fmt.bufPrint(&chat_title_buf, "Chat: {s}", .{current_chat_name});
+        const clean_chat_name = stripVariationSelectors(render_alloc, current_chat_name) catch current_chat_name;
+        const chat_title_text = try std.fmt.allocPrint(render_alloc, "Chat: {s}", .{clean_chat_name});
         _ = chat_title_win.printSegment(.{
             .text = chat_title_text,
             .style = .{ .bold = true, .fg = .{ .index = 2 } }, // Green
@@ -321,8 +370,10 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
                 const chat_panel_width = if (chat_width > 8) chat_width - 8 else 1;
                 for (messages.items) |msg| {
                     const time_str = formatTimestamp(render_alloc, msg.timestamp, state.app_config.datetime_format) catch "??:??";
-                    const msg_text = std.fmt.allocPrint(render_alloc, "[{s}] {s}: {s}", .{ time_str, msg.sender_name, msg.content }) catch continue;
-                    const wrapped = wrapText(render_alloc, msg_text, chat_panel_width) catch continue;
+                    const clean_sender = stripVariationSelectors(render_alloc, msg.sender_name) catch msg.sender_name;
+                    const clean_content = stripVariationSelectors(render_alloc, msg.content) catch msg.content;
+                    const msg_text = std.fmt.allocPrint(render_alloc, "[{s}] {s}: {s}", .{ time_str, clean_sender, clean_content }) catch continue;
+                    const wrapped = wrapText(render_alloc, msg_text, chat_panel_width, width_method) catch continue;
                     const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{wrapped}) catch continue;
                     state.chat_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
                 }
@@ -398,7 +449,8 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
     const panel_width = if (llm_chat_width > 6) llm_chat_width - 6 else 1;
 
     for (state.llm_messages.items) |msg| {
-        const wrapped = wrapText(render_alloc, msg, panel_width) catch continue;
+        const clean_msg = stripVariationSelectors(render_alloc, msg) catch msg;
+        const wrapped = wrapText(render_alloc, clean_msg, panel_width, width_method) catch continue;
         const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{wrapped}) catch continue;
         char_count += display_text.len;
         state.llm_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
