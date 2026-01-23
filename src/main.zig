@@ -181,6 +181,10 @@ pub fn main() !void {
 
     var active_mode: InputMode = .chat;
 
+    var chat_list_text_view: vaxis.widgets.TextView = .{};
+    var chat_list_text_buffer: vaxis.widgets.TextView.Buffer = .{};
+    defer chat_list_text_buffer.deinit(alloc);
+
     var chat_text_view: vaxis.widgets.TextView = .{};
     var chat_text_buffer: vaxis.widgets.TextView.Buffer = .{};
     defer chat_text_buffer.deinit(alloc);
@@ -222,6 +226,8 @@ pub fn main() !void {
             .keymap = &keymap,
             .telegram_queue = &telegram_queue,
             .ai_queue = &ai_queue,
+            .chat_list_text_view = &chat_list_text_view,
+            .chat_list_text_buffer = &chat_list_text_buffer,
             .chat_text_view = &chat_text_view,
             .chat_text_buffer = &chat_text_buffer,
             .chat_input = &chat_input,

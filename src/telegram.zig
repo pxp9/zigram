@@ -392,6 +392,7 @@ pub fn getChatHistory(
                                 }
 
                                 std.log.info("Returning {d} messages after retry", .{messages.items.len});
+                                std.mem.reverse(Message, messages.items);
                                 return messages;
                             }
                         }
@@ -441,6 +442,7 @@ pub fn getChatHistory(
                 }
 
                 std.log.info("Returning {d} messages", .{messages.items.len});
+                std.mem.reverse(Message, messages.items);
                 return messages;
             }
         }

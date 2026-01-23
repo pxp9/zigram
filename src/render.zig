@@ -67,27 +67,6 @@ fn displayWidthWithMethod(text: []const u8, method: vaxis.gwidth.Method) usize {
     return vaxis.gwidth.gwidth(text, method);
 }
 
-fn truncateToDisplayWidth(alloc: std.mem.Allocator, text: []const u8, max_width: usize, method: vaxis.gwidth.Method) ![]const u8 {
-    const text_width = displayWidthWithMethod(text, method);
-    if (text_width <= max_width) {
-        return try alloc.dupe(u8, text);
-    }
-
-    var result: std.ArrayList(u8) = .empty;
-    errdefer result.deinit(alloc);
-
-    var current_width: usize = 0;
-    var giter = vaxis.unicode.GraphemeIterator.init(text);
-    while (giter.next()) |grapheme| {
-        const grapheme_width = vaxis.gwidth.gwidth(grapheme.bytes(text), method);
-        if (current_width + grapheme_width > max_width) break;
-        try result.appendSlice(alloc, grapheme.bytes(text));
-        current_width += grapheme_width;
-    }
-
-    return try result.toOwnedSlice(alloc);
-}
-
 fn wrapText(alloc: std.mem.Allocator, text: []const u8, width: usize, method: vaxis.gwidth.Method) ![]const u8 {
     if (width == 0) return try alloc.dupe(u8, text);
 
@@ -170,6 +149,8 @@ pub const AppState = struct {
     keymap: *keybindings.ModeKeymap,
     telegram_queue: *telegram.TelegramQueue,
     ai_queue: *ai.AiQueue,
+    chat_list_text_view: *TextView,
+    chat_list_text_buffer: *TextViewBuffer,
     chat_text_view: *TextView,
     chat_text_buffer: *TextViewBuffer,
     chat_input: *TextInput,
@@ -246,62 +227,51 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
         .style = chat_list_border_style,
     }, .{});
 
+    const chat_list_content_height = if (panel_height > 3) panel_height - 3 else 1;
     const chat_list_content = chat_list_panel.child(.{
         .x_off = 1,
         .y_off = 2,
         .width = if (chat_list_width > 2) chat_list_width - 2 else 1,
-        .height = if (panel_height > 3) panel_height - 3 else 1,
+        .height = chat_list_content_height,
     });
     chat_list_content.fill(.{ .char = .{ .grapheme = " " } });
 
+    state.chat_list_text_buffer.clear(alloc);
+
     if (state.chats.items.len == 0) {
-        const no_chats_win = chat_list_panel.child(.{
-            .x_off = 2,
-            .y_off = 3,
+        const no_chats_text = "No chats";
+        try state.chat_list_text_buffer.append(alloc, .{ .bytes = no_chats_text });
+        try state.chat_list_text_buffer.updateStyle(alloc, .{
+            .begin = 0,
+            .end = no_chats_text.len,
+            .style = .{ .italic = true, .fg = .{ .index = 8 } },
         });
-        _ = no_chats_win.printSegment(.{
-            .text = "No chats",
-            .style = .{ .fg = .{ .index = 8 } }, // Gray
-        }, .{});
     } else {
-        var idx: usize = 0;
-        while (idx < state.chats.items.len) : (idx += 1) {
-            const chat = state.chats.items[idx];
-            const item_y = 3 + idx;
+        const max_name_width = if (chat_list_width > 4) chat_list_width - 4 else 1;
 
-            if (item_y < panel_height - 1) {
-                const is_selected = idx == state.selected_chat_idx.*;
-                const chat_style: vaxis.Style = if (is_selected)
-                    .{ .bold = true, .fg = .{ .index = 3 }, .reverse = state.active_mode.* == .chat_list }
-                else
-                    .{};
+        for (state.chats.items, 0..) |chat, idx| {
+            const is_selected = idx == state.selected_chat_idx.*;
 
-                const prefix_win = chat_list_panel.child(.{
-                    .x_off = 2,
-                    .y_off = @intCast(item_y),
-                });
-                const prefix = if (is_selected) "> " else "  ";
-                _ = prefix_win.printSegment(.{
-                    .text = prefix,
-                    .style = chat_style,
-                }, .{});
+            const clean_title = stripVariationSelectors(render_alloc, chat.title) catch chat.title;
+            const wrapped_title = wrapText(render_alloc, clean_title, max_name_width, width_method) catch clean_title;
 
-                const max_name_width = if (chat_list_width > 6) chat_list_width - 6 else 1;
+            const prefix = if (is_selected) "> " else "  ";
+            const entry_text = std.fmt.allocPrint(render_alloc, "{s}{s}\n", .{ prefix, wrapped_title }) catch continue;
 
-                const clean_title = stripVariationSelectors(render_alloc, chat.title) catch chat.title;
-                const truncated_chat = truncateToDisplayWidth(render_alloc, clean_title, max_name_width, width_method) catch clean_title;
+            const start_pos = state.chat_list_text_buffer.content.items.len;
+            state.chat_list_text_buffer.append(alloc, .{ .bytes = entry_text }) catch continue;
 
-                const chat_item = chat_list_panel.child(.{
-                    .x_off = 4, // 2 (padding) + 2 (prefix width)
-                    .y_off = @intCast(item_y),
-                });
-                _ = chat_item.printSegment(.{
-                    .text = truncated_chat,
-                    .style = chat_style,
-                }, .{});
+            if (is_selected) {
+                state.chat_list_text_buffer.updateStyle(alloc, .{
+                    .begin = start_pos,
+                    .end = start_pos + entry_text.len,
+                    .style = .{ .bold = true, .fg = .{ .index = 3 }, .reverse = state.active_mode.* == .chat_list },
+                }) catch continue;
             }
         }
     }
+
+    state.chat_list_text_view.draw(chat_list_content, state.chat_list_text_buffer.*);
 
     const chat_panel = win.child(.{
         .x_off = @intCast(chat_list_width),
