@@ -150,7 +150,7 @@ pub fn main() !void {
     }
 
     std.log.info("Requesting chats from Telegram...", .{});
-    try telegram_queue.postRequest(.{ .load_chats = .{ .count = 20 } });
+    try telegram_queue.post(.{ .load_chats = .{ .count = 20 } });
 
     var selected_chat_idx: usize = 0;
 
@@ -296,7 +296,7 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
 
                     if (state.chats.items.len > 0) {
                         const first_chat = state.chats.items[0];
-                        try state.telegram_queue.postRequest(.{
+                        try state.telegram_queue.post(.{
                             .load_chat_history = .{
                                 .chat_id = first_chat.id,
                                 .limit = 10,
@@ -486,7 +486,7 @@ fn applyAiUpdateResult(alloc: std.mem.Allocator, state: *AppState, result: ai.Ai
         },
         .send_telegram => |msg| {
             const text_copy = try alloc.dupe(u8, msg.text);
-            try state.telegram_queue.postRequest(.{
+            try state.telegram_queue.post(.{
                 .send_message = .{ .chat_id = msg.chat_id, .text = text_copy },
             });
         },
@@ -495,7 +495,7 @@ fn applyAiUpdateResult(alloc: std.mem.Allocator, state: *AppState, result: ai.Ai
                 try std.fmt.allocPrint(alloc, "Message sent successfully to chat '{s}'", .{res.message})
             else
                 try std.fmt.allocPrint(alloc, "Chat '{s}' not found in your conversations", .{res.message});
-            try state.ai_queue.postRequest(.{ .tool_result = .{ .success = res.success, .message = message } });
+            try state.ai_queue.post(.{ .tool_result = .{ .success = res.success, .message = message } });
         },
     }
 }
@@ -542,7 +542,7 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
             if (!state.chat_messages_cache.contains(selected_chat.id)) {
                 std.log.info("Requesting messages for chat: {s}", .{selected_chat.title});
                 state.loading_messages.* = true;
-                try state.telegram_queue.postRequest(.{
+                try state.telegram_queue.post(.{
                     .load_chat_history = .{ .chat_id = selected_chat.id, .limit = 10 },
                 });
             }
@@ -554,7 +554,7 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
             const selected_chat = state.chats.items[state.selected_chat_idx.*];
             const message_text = try state.chat_input.toOwnedSlice();
             std.log.info("Sending message to chat {d}", .{selected_chat.id});
-            try state.telegram_queue.postRequest(.{
+            try state.telegram_queue.post(.{
                 .send_message = .{ .chat_id = selected_chat.id, .text = message_text },
             });
         },
@@ -634,7 +634,7 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
             const enhanced_prompt = try chat_list.toOwnedSlice(alloc);
 
             state.llm_loading.* = true;
-            try state.ai_queue.postRequest(.{ .send_message = .{ .prompt = enhanced_prompt } });
+            try state.ai_queue.post(.{ .send_message = .{ .prompt = enhanced_prompt } });
         },
     }
 }
@@ -718,8 +718,8 @@ fn handle_key_action(alloc: std.mem.Allocator, state: *AppState, action: keybind
     switch (action) {
         .quit => {
             std.log.info("Quit requested, shutting down threads", .{});
-            state.telegram_queue.postRequest(.{ .shutdown = {} }) catch {};
-            state.ai_queue.postRequest(.{ .shutdown = {} }) catch {};
+            state.telegram_queue.post(.{ .shutdown = {} }) catch {};
+            state.ai_queue.post(.{ .shutdown = {} }) catch {};
             return 0;
         },
         .switch_mode => state.active_mode.* = switch (state.active_mode.*) {

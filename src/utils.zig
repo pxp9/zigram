@@ -20,17 +20,20 @@ pub const Event = union(enum) {
     ai_update: ai.AiUpdate,
 };
 
+pub const TelegramQueue = Queue(telegram.TelegramRequest);
+pub const AiQueue = Queue(ai.AiRequest);
+
 pub const TelegramThreadContext = struct {
     client: *tdlib.Client,
     loop: *vaxis.Loop(Event),
-    request_queue: *telegram.TelegramQueue,
+    request_queue: *TelegramQueue,
     alloc: std.mem.Allocator,
 };
 
 pub const AiThreadContext = struct {
     config: *ai.Config,
     loop: *vaxis.Loop(Event),
-    request_queue: *ai.AiQueue,
+    request_queue: *AiQueue,
     alloc: std.mem.Allocator,
 };
 
@@ -39,6 +42,40 @@ pub const InputMode = enum {
     llm,
     chat_list,
 };
+
+pub fn Queue(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        mutex: std.Thread.Mutex = .{},
+        requests: std.ArrayList(T),
+        alloc: std.mem.Allocator,
+
+        pub fn init(alloc: std.mem.Allocator) Self {
+            return .{
+                .requests = .empty,
+                .alloc = alloc,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.requests.deinit(self.alloc);
+        }
+
+        pub fn post(self: *Self, request: T) !void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            try self.requests.append(self.alloc, request);
+        }
+
+        pub fn next(self: *Self) ?T {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.requests.items.len == 0) return null;
+            return self.requests.orderedRemove(0);
+        }
+    };
+}
 
 pub const AppState = struct {
     vx: *vaxis.Vaxis,
@@ -53,8 +90,8 @@ pub const AppState = struct {
     llm_loading: *bool,
     keybindings: *keybindings.KeyBindings,
     keymap: *keybindings.ModeKeymap,
-    telegram_queue: *telegram.TelegramQueue,
-    ai_queue: *ai.AiQueue,
+    telegram_queue: *TelegramQueue,
+    ai_queue: *AiQueue,
     chat_list_text_view: *TextView,
     chat_list_text_buffer: *TextViewBuffer,
     chat_text_view: *TextView,

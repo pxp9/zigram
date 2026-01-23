@@ -500,39 +500,11 @@ pub const TelegramRequest = union(TelegramRequestKind) {
     shutdown: void,
 };
 
-pub const TelegramQueue = struct {
-    mutex: std.Thread.Mutex = .{},
-    requests: std.ArrayList(TelegramRequest),
-    alloc: std.mem.Allocator,
-
-    pub fn init(alloc: std.mem.Allocator) TelegramQueue {
-        return .{
-            .requests = .empty,
-            .alloc = alloc,
-        };
-    }
-
-    pub fn deinit(self: *TelegramQueue) void {
-        self.requests.deinit(self.alloc);
-    }
-
-    pub fn postRequest(self: *TelegramQueue, request: TelegramRequest) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        try self.requests.append(self.alloc, request);
-    }
-
-    pub fn nextRequest(self: *TelegramQueue) ?TelegramRequest {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.requests.items.len == 0) return null;
-        return self.requests.orderedRemove(0);
-    }
-};
+pub const TelegramQueue = utils.TelegramQueue;
 
 pub fn telegramUpdateLoop(ctx: utils.TelegramThreadContext) void {
     while (true) {
-        while (ctx.request_queue.nextRequest()) |request| {
+        while (ctx.request_queue.next()) |request| {
             switch (request) {
                 .load_chats => |req| {
                     std.log.info("Processing load_chats request, count={d}", .{req.count});

@@ -140,37 +140,7 @@ pub const AiRequest = union(AiRequestKind) {
     shutdown: void,
 };
 
-pub const AiQueue = struct {
-    mutex: std.Thread.Mutex = .{},
-    requests: std.ArrayList(AiRequest),
-    alloc: std.mem.Allocator,
-
-    pub fn init(alloc: std.mem.Allocator) AiQueue {
-        return .{
-            .requests = .empty,
-            .alloc = alloc,
-        };
-    }
-
-    pub fn deinit(self: *AiQueue) void {
-        self.requests.deinit(self.alloc);
-    }
-
-    pub fn postRequest(self: *AiQueue, request: AiRequest) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        try self.requests.append(self.alloc, request);
-    }
-
-    pub fn getRequest(self: *AiQueue) ?AiRequest {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.requests.items.len == 0) return null;
-        const request = self.requests.items[0];
-        _ = self.requests.orderedRemove(0);
-        return request;
-    }
-};
+pub const AiQueue = utils.AiQueue;
 
 pub const MessageRole = enum {
     user,
@@ -195,7 +165,7 @@ pub fn aiAgentLoop(ctx: utils.AiThreadContext) void {
     }
 
     while (true) {
-        const req = ctx.request_queue.getRequest() orelse {
+        const req = ctx.request_queue.next() orelse {
             std.Thread.yield() catch {};
             continue;
         };
