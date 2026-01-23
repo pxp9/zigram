@@ -1,6 +1,7 @@
 const std = @import("std");
 const tdlib = @import("tdlib.zig");
 const vaxis = @import("vaxis");
+const utils = @import("utils.zig");
 
 pub const Chat = struct {
     id: i64,
@@ -529,7 +530,7 @@ pub const TelegramQueue = struct {
     }
 };
 
-pub fn telegramUpdateLoop(ctx: anytype) void {
+pub fn telegramUpdateLoop(ctx: utils.TelegramThreadContext) void {
     while (true) {
         while (ctx.request_queue.nextRequest()) |request| {
             switch (request) {

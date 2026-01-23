@@ -7,6 +7,7 @@ const telegram = @import("telegram.zig");
 const keybindings = @import("keybindings.zig");
 const render = @import("render.zig");
 const ai = @import("ai.zig");
+const utils = @import("utils.zig");
 
 const KeyAction = keybindings.KeyAction;
 const KeyBindings = keybindings.KeyBindings;
@@ -38,26 +39,14 @@ fn logToFile(
     global_log_file.writeAll("\n") catch return;
 }
 
-const Event = union(enum) {
-    key_press: vaxis.Key,
-    winsize: vaxis.Winsize,
-    focus_in,
-    focus_out,
-    mouse: vaxis.Mouse,
-    telegram_update: telegram.TelegramUpdate,
-    ai_update: ai.AiUpdate,
-};
+const Event = utils.Event;
 
-const InputMode = render.InputMode;
-const AppState = render.AppState;
+const InputMode = utils.InputMode;
+const AppState = utils.AppState;
 const MAX_MESSAGE_LENGTH = render.MAX_MESSAGE_LENGTH;
 
-const TelegramThreadContext = struct {
-    client: *tdlib.Client,
-    loop: *vaxis.Loop(Event),
-    request_queue: *telegram.TelegramQueue,
-    alloc: std.mem.Allocator,
-};
+const TelegramThreadContext = utils.TelegramThreadContext;
+const AiThreadContext = utils.AiThreadContext;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -199,7 +188,7 @@ pub fn main() !void {
     var llm_input = vaxis.widgets.TextInput.init(alloc);
     defer llm_input.deinit();
 
-    const ai_ctx = ai.AiThreadContext(Event){
+    const ai_ctx = AiThreadContext{
         .config = &ai_config,
         .loop = &loop,
         .request_queue = &ai_queue,

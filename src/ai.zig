@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const google = @import("ai/google.zig");
+const utils = @import("utils.zig");
 
 pub const default_system_prompt = "You are a helpful assistant integrated into a Telegram client. " ++
     "Answer in the same language the user is using or in the language the user requests. " ++
@@ -92,7 +93,7 @@ pub fn listModels(alloc: std.mem.Allocator, config: *const Config) ![]const u8 {
     };
 }
 
-pub fn sendMessageStreaming(alloc: std.mem.Allocator, config: *const Config, history: []const ConversationMessage, loop: anytype) ![]const u8 {
+pub fn sendMessageStreaming(alloc: std.mem.Allocator, config: *const Config, history: []const ConversationMessage, loop: *vaxis.Loop(utils.Event)) ![]const u8 {
     return switch (config.provider) {
         .google_ai => try google.sendMessageStreaming(alloc, &config.provider_config, history, loop),
     };
@@ -182,16 +183,7 @@ pub const ConversationMessage = struct {
     content: []const u8,
 };
 
-pub fn AiThreadContext(comptime Event: type) type {
-    return struct {
-        config: *Config,
-        loop: *vaxis.Loop(Event),
-        request_queue: *AiQueue,
-        alloc: std.mem.Allocator,
-    };
-}
-
-pub fn aiAgentLoop(ctx: anytype) void {
+pub fn aiAgentLoop(ctx: utils.AiThreadContext) void {
     std.log.info("AI agent thread started", .{});
 
     var conversation_history: std.ArrayList(ConversationMessage) = .empty;
@@ -219,7 +211,7 @@ pub fn aiAgentLoop(ctx: anytype) void {
     }
 }
 
-fn handleToolResult(ctx: anytype, conversation_history: *std.ArrayList(ConversationMessage), result: anytype) void {
+fn handleToolResult(ctx: utils.AiThreadContext, conversation_history: *std.ArrayList(ConversationMessage), result: @FieldType(AiRequest, "tool_result")) void {
     const result_text = if (result.success)
         std.fmt.allocPrint(ctx.alloc, "Tool execution successful: {s}", .{result.message}) catch {
             std.log.err("Failed to format tool result", .{});
@@ -258,7 +250,7 @@ fn handleToolResult(ctx: anytype, conversation_history: *std.ArrayList(Conversat
     std.log.info("Tool result added to conversation history", .{});
 }
 
-fn handleSendMessage(ctx: anytype, conversation_history: *std.ArrayList(ConversationMessage), msg: anytype) void {
+fn handleSendMessage(ctx: utils.AiThreadContext, conversation_history: *std.ArrayList(ConversationMessage), msg: @FieldType(AiRequest, "send_message")) void {
     const prompt_copy = ctx.alloc.dupe(u8, msg.prompt) catch {
         ctx.alloc.free(msg.prompt);
         return;

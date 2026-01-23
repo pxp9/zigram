@@ -4,6 +4,7 @@ const auth = @import("auth.zig");
 const telegram = @import("telegram.zig");
 const keybindings = @import("keybindings.zig");
 const ai = @import("ai.zig");
+const utils = @import("utils.zig");
 
 const libc = @cImport({
     @cInclude("time.h");
@@ -128,38 +129,8 @@ fn wrapText(alloc: std.mem.Allocator, text: []const u8, width: usize, method: va
     return try result.toOwnedSlice(alloc);
 }
 
-pub const InputMode = enum {
-    chat,
-    llm,
-    chat_list,
-};
-
-pub const AppState = struct {
-    vx: *vaxis.Vaxis,
-    tty: *vaxis.Tty,
-    user: *auth.User,
-    chats: *std.ArrayList(telegram.Chat),
-    selected_chat_idx: *usize,
-    chat_messages_cache: *std.AutoHashMap(i64, std.ArrayList(telegram.Message)),
-    loading_messages: *bool,
-    active_mode: *InputMode,
-    llm_messages: *std.ArrayList([]const u8),
-    llm_loading: *bool,
-    keybindings: *keybindings.KeyBindings,
-    keymap: *keybindings.ModeKeymap,
-    telegram_queue: *telegram.TelegramQueue,
-    ai_queue: *ai.AiQueue,
-    chat_list_text_view: *TextView,
-    chat_list_text_buffer: *TextViewBuffer,
-    chat_text_view: *TextView,
-    chat_text_buffer: *TextViewBuffer,
-    chat_input: *TextInput,
-    llm_text_view: *TextView,
-    llm_text_buffer: *TextViewBuffer,
-    llm_input: *TextInput,
-    ai_config: *ai.Config,
-    app_config: *keybindings.AppConfig,
-};
+pub const InputMode = utils.InputMode;
+pub const AppState = utils.AppState;
 
 pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
     var render_arena = std.heap.ArenaAllocator.init(alloc);
