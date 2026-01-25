@@ -6,11 +6,11 @@ const utils = @import("../utils.zig");
 const AiUpdateKind = ai.AiUpdateKind;
 const ConversationMessage = ai.ConversationMessage;
 const ToolCall = ai.ToolCall;
-const ProviderConfig = ai.ProviderConfig;
+const GoogleAiConfig = ai.GoogleAiConfig;
 
 pub const default_model = "gemini-3-flash-preview";
 
-pub fn listModels(alloc: std.mem.Allocator, config: *const ProviderConfig) ![]const u8 {
+pub fn listModels(alloc: std.mem.Allocator, config: *const GoogleAiConfig) ![]const u8 {
     var client = std.http.Client{ .allocator = alloc };
     defer client.deinit();
 
@@ -41,7 +41,7 @@ pub fn listModels(alloc: std.mem.Allocator, config: *const ProviderConfig) ![]co
     return response_body;
 }
 
-pub fn sendMessageStreaming(alloc: std.mem.Allocator, config: *const ProviderConfig, history: []const ConversationMessage, loop: *vaxis.Loop(utils.Event)) ![]const u8 {
+pub fn sendMessageStreaming(alloc: std.mem.Allocator, config: *const GoogleAiConfig, history: []const ConversationMessage, loop: *vaxis.Loop(utils.Event)) ![]const u8 {
     var client = std.http.Client{ .allocator = alloc };
     defer client.deinit();
 

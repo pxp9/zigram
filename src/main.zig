@@ -8,6 +8,7 @@ const keybindings = @import("keybindings.zig");
 const render = @import("render.zig");
 const ai = @import("ai.zig");
 const utils = @import("utils.zig");
+const mcp_socket = @import("mcp_socket.zig");
 
 const KeyAction = keybindings.KeyAction;
 const KeyBindings = keybindings.KeyBindings;
@@ -74,9 +75,8 @@ pub fn main() !void {
 
     var ai_config = ai.loadConfig(alloc) catch |err| blk: {
         std.log.warn("Failed to load AI config: {any}. AI assistant will be disabled.", .{err});
-        break :blk ai.Config{
-            .provider = .google_ai,
-            .provider_config = .{
+        break :blk ai.ProviderConfig{
+            .google_ai = .{
                 .api_key = "",
                 .model = "",
                 .system_prompt = ai.default_system_prompt,
@@ -188,13 +188,64 @@ pub fn main() !void {
     var llm_input = vaxis.widgets.TextInput.init(alloc);
     defer llm_input.deinit();
 
-    const ai_ctx = AiThreadContext{
-        .config = &ai_config,
-        .loop = &loop,
-        .request_queue = &ai_queue,
-        .alloc = alloc,
+    // Buffers for MCP server path
+    var self_exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var mcp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    // Spawn AI thread based on provider type
+    const ai_thread = switch (ai_config) {
+        .google_ai => blk: {
+            const ai_ctx = AiThreadContext{
+                .config = &ai_config,
+                .loop = &loop,
+                .request_queue = &ai_queue,
+                .alloc = alloc,
+            };
+            break :blk try std.Thread.spawn(.{}, ai.aiAgentLoop, .{ai_ctx});
+        },
+        .claude_code => |*cfg| blk: {
+            // Start MCP socket server for tool execution
+            var mcp_server = mcp_socket.McpSocketServer.init(alloc, mcp_socket.default_socket_path) catch |err| {
+                std.log.err("Failed to start MCP socket server: {any}", .{err});
+                return err;
+            };
+            var mcp_running = true;
+
+            const mcp_ctx = mcp_socket.McpSocketContext{
+                .server = &mcp_server,
+                .telegram_queue = &telegram_queue,
+                .chats = &chats,
+                .alloc = alloc,
+                .running = &mcp_running,
+            };
+
+            const mcp_thread = try std.Thread.spawn(.{}, mcp_socket.mcpSocketThread, .{mcp_ctx});
+            _ = mcp_thread;
+
+            // Get absolute path to zigram-mcp binary (same directory as zigram executable)
+            const self_exe_dir = std.fs.selfExeDirPath(&self_exe_buf) catch {
+                std.log.err("Failed to get self exe dir path", .{});
+                return error.SelfExePathFailed;
+            };
+            const mcp_server_path = std.fmt.bufPrint(&mcp_path_buf, "{s}/zigram-mcp", .{self_exe_dir}) catch {
+                std.log.err("Failed to format MCP server path", .{});
+                return error.PathFormatFailed;
+            };
+            std.log.info("MCP server path: {s}", .{mcp_server_path});
+
+            const acp_ctx = ai.AcpThreadContext{
+                .config = cfg,
+                .loop = &loop,
+                .request_queue = &ai_queue,
+                .telegram_queue = &telegram_queue,
+                .chats = &chats,
+                .mcp_server_path = mcp_server_path,
+                .mcp_socket_path = mcp_socket.default_socket_path,
+                .alloc = alloc,
+            };
+            break :blk try std.Thread.spawn(.{}, ai.acpAgentLoop, .{acp_ctx});
+        },
     };
-    const ai_thread = try std.Thread.spawn(.{}, ai.aiAgentLoop, .{ai_ctx});
     defer ai_thread.join();
 
     while (true) {
@@ -564,8 +615,14 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
             const user_msg = try std.fmt.allocPrint(alloc, "You: {s}", .{input_text});
             try state.llm_messages.append(alloc, user_msg);
 
-            if (state.ai_config.provider_config.api_key.len == 0) {
-                const error_msg = try alloc.dupe(u8, "AI: Error - No API key configured");
+            // Check if AI is configured
+            const is_configured = switch (state.ai_config.*) {
+                .google_ai => |cfg| cfg.api_key.len > 0,
+                .claude_code => true,
+            };
+
+            if (!is_configured) {
+                const error_msg = try alloc.dupe(u8, "AI: Error - No AI provider configured");
                 try state.llm_messages.append(alloc, error_msg);
                 alloc.free(input_text);
                 return;
@@ -580,6 +637,16 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
                     return;
                 };
                 defer alloc.free(models_json);
+
+                // For Claude Code, just display the message directly
+                switch (state.ai_config.*) {
+                    .claude_code => {
+                        const models_msg = try std.fmt.allocPrint(alloc, "AI: {s}", .{models_json});
+                        try state.llm_messages.append(alloc, models_msg);
+                        return;
+                    },
+                    .google_ai => {},
+                }
 
                 const parsed = std.json.parseFromSlice(std.json.Value, alloc, models_json, .{}) catch {
                     const error_msg = try alloc.dupe(u8, "AI: Error parsing models response");
@@ -617,24 +684,34 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
                 return;
             }
 
-            // Build chat list context
-            var chat_list: std.ArrayList(u8) = .empty;
-            defer chat_list.deinit(alloc);
+            // Build chat list context (only for Google AI, Claude Code has its own context)
+            switch (state.ai_config.*) {
+                .google_ai => {
+                    var chat_list: std.ArrayList(u8) = .empty;
+                    defer chat_list.deinit(alloc);
 
-            try chat_list.appendSlice(alloc, "Available chats: ");
-            for (state.chats.items, 0..) |chat, i| {
-                if (i > 0) try chat_list.appendSlice(alloc, ", ");
-                try chat_list.appendSlice(alloc, "\"");
-                try chat_list.appendSlice(alloc, chat.title);
-                try chat_list.appendSlice(alloc, "\"");
+                    try chat_list.appendSlice(alloc, "Available chats: ");
+                    for (state.chats.items, 0..) |chat, i| {
+                        if (i > 0) try chat_list.appendSlice(alloc, ", ");
+                        try chat_list.appendSlice(alloc, "\"");
+                        try chat_list.appendSlice(alloc, chat.title);
+                        try chat_list.appendSlice(alloc, "\"");
+                    }
+                    try chat_list.appendSlice(alloc, "\n\n");
+                    try chat_list.appendSlice(alloc, input_text);
+
+                    const enhanced_prompt = try chat_list.toOwnedSlice(alloc);
+                    alloc.free(input_text);
+
+                    state.llm_loading.* = true;
+                    try state.ai_queue.post(.{ .send_message = .{ .prompt = enhanced_prompt } });
+                },
+                .claude_code => {
+                    // For Claude Code, send the prompt directly
+                    state.llm_loading.* = true;
+                    try state.ai_queue.post(.{ .send_message = .{ .prompt = input_text } });
+                },
             }
-            try chat_list.appendSlice(alloc, "\n\n");
-            try chat_list.appendSlice(alloc, input_text);
-
-            const enhanced_prompt = try chat_list.toOwnedSlice(alloc);
-
-            state.llm_loading.* = true;
-            try state.ai_queue.post(.{ .send_message = .{ .prompt = enhanced_prompt } });
         },
     }
 }

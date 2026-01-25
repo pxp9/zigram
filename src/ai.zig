@@ -1,20 +1,21 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const google = @import("ai/google.zig");
+const acp = @import("ai/acp.zig");
 const utils = @import("utils.zig");
 
 pub const default_system_prompt = "You are a helpful assistant integrated into a Telegram client. " ++
     "Answer in the same language the user is using or in the language the user requests. " ++
     "Be concise and helpful.";
 
-pub const ProviderConfig = struct {
+pub const GoogleAiConfig = struct {
     api_key: []const u8,
     model: []const u8,
     system_prompt: []const u8,
     allocated: bool = false,
     system_prompt_allocated: bool = false,
 
-    pub fn deinit(self: *ProviderConfig, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *GoogleAiConfig, alloc: std.mem.Allocator) void {
         if (self.allocated) {
             alloc.free(self.api_key);
             alloc.free(self.model);
@@ -23,20 +24,21 @@ pub const ProviderConfig = struct {
     }
 };
 
-pub const Provider = enum {
-    google_ai,
-};
+pub const ClaudeCodeConfig = acp.ClaudeCodeConfig;
 
-pub const Config = struct {
-    provider: Provider,
-    provider_config: ProviderConfig,
+pub const ProviderConfig = union(enum) {
+    google_ai: GoogleAiConfig,
+    claude_code: ClaudeCodeConfig,
 
-    pub fn deinit(self: *Config, alloc: std.mem.Allocator) void {
-        self.provider_config.deinit(alloc);
+    pub fn deinit(self: *ProviderConfig, alloc: std.mem.Allocator) void {
+        switch (self.*) {
+            .google_ai => |*cfg| cfg.deinit(alloc),
+            .claude_code => |*cfg| cfg.deinit(alloc),
+        }
     }
 };
 
-pub fn loadConfig(alloc: std.mem.Allocator) !Config {
+pub fn loadConfig(alloc: std.mem.Allocator) !ProviderConfig {
     const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
     const config_path = try std.fs.path.join(alloc, &[_][]const u8{ home, ".config", "zigram", "zigram.json" });
     defer alloc.free(config_path);
@@ -62,23 +64,23 @@ pub fn loadConfig(alloc: std.mem.Allocator) !Config {
 
         if (std.mem.eql(u8, provider_str.string, "google_ai")) {
             const provider_config_json = ai_obj.object.get("google_ai") orelse return error.NoGoogleAiConfig;
-            return Config{
-                .provider = .google_ai,
-                .provider_config = try loadProviderConfig(alloc, provider_config_json, google.default_model),
-            };
+            return ProviderConfig{ .google_ai = try loadGoogleAiConfig(alloc, provider_config_json) };
+        } else if (std.mem.eql(u8, provider_str.string, "claude_code")) {
+            const provider_config_json = ai_obj.object.get("claude_code") orelse return error.NoClaudeCodeConfig;
+            return ProviderConfig{ .claude_code = try loadClaudeCodeConfig(alloc, provider_config_json) };
         }
     }
 
     return error.NoAiConfig;
 }
 
-fn loadProviderConfig(alloc: std.mem.Allocator, config_json: std.json.Value, default_model: []const u8) !ProviderConfig {
+fn loadGoogleAiConfig(alloc: std.mem.Allocator, config_json: std.json.Value) !GoogleAiConfig {
     const api_key = config_json.object.get("api_key") orelse return error.NoApiKey;
-    const model_name = if (config_json.object.get("model")) |m| m.string else default_model;
+    const model_name = if (config_json.object.get("model")) |m| m.string else google.default_model;
     const has_custom_prompt = config_json.object.get("system_prompt") != null;
     const system_prompt = if (config_json.object.get("system_prompt")) |sp| try alloc.dupe(u8, sp.string) else default_system_prompt;
 
-    return ProviderConfig{
+    return GoogleAiConfig{
         .api_key = try alloc.dupe(u8, api_key.string),
         .model = try alloc.dupe(u8, model_name),
         .system_prompt = system_prompt,
@@ -87,15 +89,44 @@ fn loadProviderConfig(alloc: std.mem.Allocator, config_json: std.json.Value, def
     };
 }
 
-pub fn listModels(alloc: std.mem.Allocator, config: *const Config) ![]const u8 {
-    return switch (config.provider) {
-        .google_ai => try google.listModels(alloc, &config.provider_config),
+fn loadClaudeCodeConfig(alloc: std.mem.Allocator, config_json: std.json.Value) !ClaudeCodeConfig {
+    const command = config_json.object.get("command") orelse return error.NoCommand;
+    const args_json = config_json.object.get("args");
+    const cwd_json = config_json.object.get("cwd");
+
+    var args: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (args.items) |arg| alloc.free(arg);
+        args.deinit(alloc);
+    }
+
+    if (args_json) |arr| {
+        for (arr.array.items) |item| {
+            try args.append(alloc, try alloc.dupe(u8, item.string));
+        }
+    }
+
+    const cwd: ?[]const u8 = if (cwd_json) |c| try alloc.dupe(u8, c.string) else null;
+
+    return ClaudeCodeConfig{
+        .command = try alloc.dupe(u8, command.string),
+        .args = try args.toOwnedSlice(alloc),
+        .cwd = cwd,
+        .allocated = true,
     };
 }
 
-pub fn sendMessageStreaming(alloc: std.mem.Allocator, config: *const Config, history: []const ConversationMessage, loop: *vaxis.Loop(utils.Event)) ![]const u8 {
-    return switch (config.provider) {
-        .google_ai => try google.sendMessageStreaming(alloc, &config.provider_config, history, loop),
+pub fn listModels(alloc: std.mem.Allocator, config: *const ProviderConfig) ![]const u8 {
+    return switch (config.*) {
+        .google_ai => |*cfg| try google.listModels(alloc, cfg),
+        .claude_code => try alloc.dupe(u8, "Claude Code does not support model listing. Models are configured in Claude Code itself."),
+    };
+}
+
+pub fn sendMessageStreaming(alloc: std.mem.Allocator, config: *const ProviderConfig, history: []const ConversationMessage, loop: *vaxis.Loop(utils.Event)) ![]const u8 {
+    return switch (config.*) {
+        .google_ai => |*cfg| try google.sendMessageStreaming(alloc, cfg, history, loop),
+        .claude_code => error.UseAcpAgentLoop,
     };
 }
 
@@ -180,6 +211,9 @@ pub fn aiAgentLoop(ctx: utils.AiThreadContext) void {
         }
     }
 }
+
+pub const acpAgentLoop = acp.acpAgentLoop;
+pub const AcpThreadContext = acp.AcpThreadContext;
 
 fn handleToolResult(ctx: utils.AiThreadContext, conversation_history: *std.ArrayList(ConversationMessage), result: @FieldType(AiRequest, "tool_result")) void {
     const result_text = if (result.success)

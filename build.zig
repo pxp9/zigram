@@ -204,6 +204,17 @@ pub fn build(b: *std.Build) void {
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
 
+    // MCP server executable for Claude Code integration
+    const mcp_server = b.addExecutable(.{
+        .name = "zigram-mcp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mcp_server.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(mcp_server);
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.

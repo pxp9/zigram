@@ -31,7 +31,7 @@ pub const TelegramThreadContext = struct {
 };
 
 pub const AiThreadContext = struct {
-    config: *ai.Config,
+    config: *ai.ProviderConfig,
     loop: *vaxis.Loop(Event),
     request_queue: *AiQueue,
     alloc: std.mem.Allocator,
@@ -74,6 +74,13 @@ pub fn Queue(comptime T: type) type {
             if (self.requests.items.len == 0) return null;
             return self.requests.orderedRemove(0);
         }
+
+        pub fn peek(self: *Self) ?T {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.requests.items.len == 0) return null;
+            return self.requests.items[0];
+        }
     };
 }
 
@@ -100,6 +107,6 @@ pub const AppState = struct {
     llm_text_view: *TextView,
     llm_text_buffer: *TextViewBuffer,
     llm_input: *TextInput,
-    ai_config: *ai.Config,
+    ai_config: *ai.ProviderConfig,
     app_config: *keybindings.AppConfig,
 };
