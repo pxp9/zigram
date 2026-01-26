@@ -23,17 +23,58 @@ const tools = [_]Tool{
     },
 };
 
+var global_log_file: std.fs.File = undefined;
+
+pub const std_options: std.Options = .{
+    .log_level = .info,
+    .logFn = logToFile,
+};
+
+fn logToFile(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const level_txt = comptime level.asText();
+    const scope_txt = if (scope == .default) "" else "(" ++ @tagName(scope) ++ ") ";
+
+    const timestamp = std.time.timestamp();
+
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "[{d}] {s} {s}", .{ timestamp, level_txt, scope_txt }) catch return;
+    global_log_file.writeAll(msg) catch return;
+
+    const formatted = std.fmt.bufPrint(&buf, format, args) catch return;
+    global_log_file.writeAll(formatted) catch return;
+    global_log_file.writeAll("\n") catch return;
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
+
+    // Setup log file
+    const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
+    const log_dir = try std.fs.path.join(alloc, &[_][]const u8{ home, ".local", "share", "zigram" });
+    defer alloc.free(log_dir);
+    std.fs.makeDirAbsolute(log_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    const log_file_path = try std.fs.path.join(alloc, &[_][]const u8{ log_dir, "mcp-server.log" });
+    defer alloc.free(log_file_path);
+
+    global_log_file = try std.fs.createFileAbsolute(log_file_path, .{ .truncate = false });
+    defer global_log_file.close();
+    try global_log_file.seekFromEnd(0); // Append to end
 
     const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
     const socket_path = std.posix.getenv("ZIGRAM_MCP_SOCKET") orelse "/tmp/zigram-mcp.sock";
 
-    std.debug.print("[mcp] starting, socket: {s}\n", .{socket_path});
+    std.log.info("MCP server starting, socket: {s}", .{socket_path});
 
     var read_buf: [65536]u8 = undefined;
     var line_start: usize = 0;

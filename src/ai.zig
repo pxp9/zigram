@@ -1,7 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const google = @import("ai/google.zig");
-const acp = @import("ai/acp.zig");
+const claude_code = @import("ai/claude_code.zig");
 const utils = @import("utils.zig");
 
 pub const default_system_prompt = "You are a helpful assistant integrated into a Telegram client. " ++
@@ -24,7 +24,7 @@ pub const GoogleAiConfig = struct {
     }
 };
 
-pub const ClaudeCodeConfig = acp.ClaudeCodeConfig;
+pub const ClaudeCodeConfig = claude_code.ClaudeCodeConfig;
 
 pub const ProviderConfig = union(enum) {
     google_ai: GoogleAiConfig,
@@ -90,28 +90,10 @@ fn loadGoogleAiConfig(alloc: std.mem.Allocator, config_json: std.json.Value) !Go
 }
 
 fn loadClaudeCodeConfig(alloc: std.mem.Allocator, config_json: std.json.Value) !ClaudeCodeConfig {
-    const command = config_json.object.get("command") orelse return error.NoCommand;
-    const args_json = config_json.object.get("args");
-    const cwd_json = config_json.object.get("cwd");
-
-    var args: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (args.items) |arg| alloc.free(arg);
-        args.deinit(alloc);
-    }
-
-    if (args_json) |arr| {
-        for (arr.array.items) |item| {
-            try args.append(alloc, try alloc.dupe(u8, item.string));
-        }
-    }
-
-    const cwd: ?[]const u8 = if (cwd_json) |c| try alloc.dupe(u8, c.string) else null;
+    const model = if (config_json.object.get("model")) |m| m.string else "claude-sonnet-4-5";
 
     return ClaudeCodeConfig{
-        .command = try alloc.dupe(u8, command.string),
-        .args = try args.toOwnedSlice(alloc),
-        .cwd = cwd,
+        .model = try alloc.dupe(u8, model),
         .allocated = true,
     };
 }
@@ -212,8 +194,8 @@ pub fn aiAgentLoop(ctx: utils.AiThreadContext) void {
     }
 }
 
-pub const acpAgentLoop = acp.acpAgentLoop;
-pub const AcpThreadContext = acp.AcpThreadContext;
+pub const acpAgentLoop = claude_code.acpAgentLoop;
+pub const AcpThreadContext = claude_code.AcpThreadContext;
 
 fn handleToolResult(ctx: utils.AiThreadContext, conversation_history: *std.ArrayList(ConversationMessage), result: @FieldType(AiRequest, "tool_result")) void {
     const result_text = if (result.success)

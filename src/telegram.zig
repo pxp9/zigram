@@ -466,7 +466,9 @@ pub fn sendMessage(
         .{ chat_id, text },
     );
     defer allocator.free(request);
+    std.log.info("Sending message to TDLib: chat_id={d}, text={s}", .{ chat_id, text });
     client.send(request);
+    std.log.info("Message sent to TDLib successfully", .{});
 }
 
 pub const TelegramUpdateKind = enum {

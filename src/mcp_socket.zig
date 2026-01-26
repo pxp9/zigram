@@ -77,6 +77,7 @@ pub fn mcpSocketThread(ctx: McpSocketContext) void {
 }
 
 fn handleClient(ctx: McpSocketContext, client: std.posix.socket_t) !void {
+    log.info("MCP socket: client connected", .{});
     var buf: [65536]u8 = undefined;
     var total: usize = 0;
 
@@ -88,7 +89,10 @@ fn handleClient(ctx: McpSocketContext, client: std.posix.socket_t) !void {
         if (std.mem.indexOfScalar(u8, buf[0..total], '\n')) |_| break;
     }
 
-    if (total == 0) return;
+    if (total == 0) {
+        log.info("MCP socket: client disconnected without sending data", .{});
+        return;
+    }
 
     // Trim newline
     var end = total;
@@ -97,7 +101,7 @@ fn handleClient(ctx: McpSocketContext, client: std.posix.socket_t) !void {
     }
 
     const request = buf[0..end];
-    log.debug("Received request: {s}", .{request});
+    log.info("MCP socket: received request: {s}", .{request});
 
     // Parse JSON request
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.alloc, request, .{}) catch |err| {
