@@ -1,272 +1,257 @@
-# ACP Client Implementation for Zigram
+# ACP Client Implementation for Zigram - COMPLETED ✓
 
 ## Overview
 
-Implement an ACP (Agent Client Protocol) client for Zigram to enable Claude Code integration when the configuration specifies `provider: "claude_code"`.
+**Status**: ✅ **IMPLEMENTED AND WORKING**
 
-## Background
+ACP (Agent Client Protocol) client has been successfully implemented for Zigram, enabling Claude Code integration when the configuration specifies `provider: "claude_code"`.
 
-### ACP Protocol Summary
-- JSON-RPC 2.0 over stdio (stdin/stdout)
-- Claude Code runs as a subprocess
-- Key methods:
-  - `initialize` - capability negotiation
-  - `session/new` - create conversation session
-  - `session/prompt` - send user messages
-  - `session/update` - receive streaming updates (notifications)
-  - `session/request_permission` - tool authorization
-  - `session/cancel` - abort operations
+## Implementation Status
 
-### Current Zigram Architecture
-- `ai.zig` - Provider abstraction, config loading, AI thread loop
-- `ai/google.zig` - Google AI HTTP streaming client
-- `utils.zig` - Event types, queues, thread contexts
-- Configuration via `~/.config/zigram/zigram.json`
+### ✅ Phase 1: ACP Protocol Types (`src/ai/acp_types.zig`)
 
-## Implementation Plan
+**Status**: COMPLETED
 
-### Phase 1: ACP Protocol Types (`src/ai/acp_types.zig`)
+Created comprehensive JSON-RPC and ACP-specific type definitions including:
+- JSON-RPC base types (requests, responses, notifications)
+- ACP session types (InitializeParams, NewSessionParams, PromptParams)
+- Session update types (SessionUpdateKind, ToolCallStatus, PermissionOption)
+- MCP server configuration types
 
-Create JSON-RPC and ACP-specific type definitions:
+### ✅ Phase 2: ACP Connection (`src/ai/acp_client.zig`)
 
-```zig
-// JSON-RPC 2.0 base types
-pub const JsonRpcRequest = struct {
-    jsonrpc: []const u8 = "2.0",
-    id: u32,
-    method: []const u8,
-    params: std.json.Value,
-};
+**Status**: COMPLETED
 
-pub const JsonRpcResponse = struct {
-    jsonrpc: []const u8,
-    id: ?u32,
-    result: ?std.json.Value,
-    @"error": ?JsonRpcError,
-};
+Fully functional ACP client implementation featuring:
+- Subprocess management for Claude Code process
+- Buffered stdin/stdout communication
+- JSON-RPC message handling (requests, responses, notifications)
+- Timeout-based message reading with polling
+- Session lifecycle management (initialize, newSession, sendPrompt, cancel)
+- Permission handling with `respondPermission`
+- AcpMessage wrapper for type-safe message parsing
 
-pub const JsonRpcNotification = struct {
-    jsonrpc: []const u8,
-    method: []const u8,
-    params: std.json.Value,
-};
+**Key Implementation Details**:
+- Uses `bunx @zed-industries/claude-code-acp` as default command
+- Implements buffered line reading with configurable timeouts
+- Proper error handling throughout the communication pipeline
+- Clean resource management with `deinit()`
 
-// ACP-specific types
-pub const InitializeParams = struct {
-    protocolVersion: u32 = 1,
-    clientCapabilities: ClientCapabilities,
-    clientInfo: ClientInfo,
-};
+### ✅ Phase 3: Provider Integration (`src/ai.zig`)
 
-pub const ClientCapabilities = struct {
-    fs: FsCapabilities,
-    terminal: bool,
-};
+**Status**: COMPLETED
 
-pub const SessionUpdate = union(enum) {
-    tool_call: ToolCall,
-    tool_call_update: ToolCallUpdate,
-    agent_message_chunk: MessageChunk,
-    // ... other update types
-};
+Extended provider system with:
+- `claude_code` provider enum variant
+- `ClaudeCodeConfig` configuration type
+- Updated `loadConfig()` to parse `claude_code` provider settings
+- Support for model selection in configuration
+- Provider-specific function dispatching
 
-pub const ToolCall = struct {
-    toolCallId: []const u8,
-    title: []const u8,
-    kind: []const u8,
-    status: ToolCallStatus,
-    // ...
-};
-```
+### ✅ Phase 4: ACP Agent Loop (`src/ai/claude_code.zig`)
 
-### Phase 2: ACP Connection (`src/ai/acp.zig`)
+**Status**: COMPLETED
 
-Implement the ACP client with subprocess management:
+Fully implemented agent loop with:
+- Process spawning and initialization
+- Session creation with MCP server registration
+- Main event loop handling:
+  - Request queue processing
+  - Prompt sending
+  - Streaming update processing
+  - Permission auto-approval (prefer `allow_always`, fallback to `allow_once`)
+  - Graceful shutdown
+- Update parsing and event posting
+- Tool call progress tracking
+- Error handling and recovery
 
-```zig
-pub const AcpConnection = struct {
-    process: std.process.Child,
-    stdin: std.process.Child.StdIn,
-    stdout_reader: std.io.BufferedReader(4096, std.process.Child.StdOut),
-    session_id: ?[]const u8,
-    request_id: u32,
-    alloc: std.mem.Allocator,
+**Notable Features**:
+- MCP server integration via `newSessionWithMcp()`
+- Real-time streaming of agent responses
+- Automatic permission approval for tools
+- Comprehensive logging for debugging
+- Timeout-based message reading to enable shutdown checks
 
-    pub fn spawn(alloc: std.mem.Allocator, command: []const u8, args: []const []const u8, cwd: []const u8) !*AcpConnection;
-    pub fn initialize(self: *AcpConnection) !InitializeResponse;
-    pub fn newSession(self: *AcpConnection, cwd: []const u8) ![]const u8;
-    pub fn sendPrompt(self: *AcpConnection, session_id: []const u8, content: []const u8) !void;
-    pub fn readUpdate(self: *AcpConnection) !?SessionUpdate;
-    pub fn respondPermission(self: *AcpConnection, request_id: u32, option_id: []const u8) !void;
-    pub fn cancel(self: *AcpConnection, session_id: []const u8) !void;
-    pub fn deinit(self: *AcpConnection) void;
-};
+### ✅ Phase 5: Event Integration
 
-fn sendRequest(self: *AcpConnection, method: []const u8, params: anytype) !void;
-fn readResponse(self: *AcpConnection) !JsonRpcResponse;
-fn readNotification(self: *AcpConnection) !?JsonRpcNotification;
-```
+**Status**: COMPLETED
 
-### Phase 3: Provider Integration (`src/ai.zig` modifications)
+Extended event types for ACP-specific updates:
+- `message_chunk` - Streaming text from agent
+- `message_completed` - Turn completion signal
+- `error_occurred` - Error reporting
+- `tool_call` - Tool invocation notifications
+- `tool_call_update` - Tool execution progress
 
-Extend the provider system:
+Event handling in `handleSessionUpdate()`:
+- Parses session update notifications
+- Extracts relevant data (text, tool info, status)
+- Posts events to main UI loop
+- Handles nested content structures
 
-```zig
-pub const Provider = enum {
-    google_ai,
-    claude_code,  // NEW
-};
+### ✅ Phase 6: MCP Integration (`src/mcp_server.zig`, `src/mcp_socket.zig`)
 
-pub const ProviderConfig = union(Provider) {
-    google_ai: GoogleAiConfig,
-    claude_code: ClaudeCodeConfig,  // NEW
-};
+**Status**: COMPLETED
 
-pub const ClaudeCodeConfig = struct {
-    command: []const u8,  // Path to claude-code or node
-    args: []const []const u8,
-    cwd: []const u8,
-};
-```
+Built-in MCP (Model Context Protocol) server enabling Claude Code to:
+- Execute Zigram-specific tools via Unix socket
+- Call `send_telegram_message` and `list_telegram_chats`
+- Receive tool results in proper MCP format
 
-Update `loadConfig()` to parse `claude_code` provider configuration.
+**Architecture**:
+- MCP server runs as subprocess, communicates via stdio
+- Socket-based IPC between MCP server and Zigram main process
+- Environment variable `ZIGRAM_MCP_SOCKET` passes socket path
+- MCP server registered during session creation
 
-### Phase 4: ACP Agent Loop (`src/ai/acp.zig`)
+## Configuration
 
-Implement the main agent loop for Claude Code:
+### Example Configuration
 
-```zig
-pub fn acpAgentLoop(ctx: AcpThreadContext) void {
-    // 1. Spawn Claude Code process
-    // 2. Send initialize request
-    // 3. Create new session
-    // 4. Main loop:
-    //    - Wait for requests from queue
-    //    - Send prompts to Claude Code
-    //    - Read streaming updates
-    //    - Post AiUpdate events to main loop
-    //    - Handle permission requests (auto-approve or post to UI)
-}
-```
-
-### Phase 5: Event Integration (`src/utils.zig` modifications)
-
-Extend event types for ACP-specific updates:
-
-```zig
-pub const AiUpdateKind = enum {
-    message_chunk,
-    message_completed,
-    error_occurred,
-    tool_call,
-    tool_call_update,      // NEW: tool progress
-    permission_request,    // NEW: user authorization needed
-};
-
-pub const AiUpdate = struct {
-    kind: AiUpdateKind,
-    data: []const u8,
-    tool_call: ?ToolCall = null,
-    permission_request: ?PermissionRequest = null,  // NEW
-};
-```
-
-### Phase 6: Configuration Schema
-
-Example configuration in `~/.config/zigram/zigram.json`:
+`~/.config/zigram/zigram.json`:
 
 ```json
 {
   "ai": {
     "provider": "claude_code",
     "claude_code": {
-      "command": "node",
-      "args": ["/path/to/claude-code-acp/dist/index.js"],
-      "cwd": "/home/user/project"
+      "model": "claude-sonnet-4-5"
     }
   }
 }
 ```
 
-Alternative with npx:
-```json
-{
-  "ai": {
-    "provider": "claude_code",
-    "claude_code": {
-      "command": "npx",
-      "args": ["@anthropic-ai/claude-code", "--print"],
-      "cwd": "/home/user/project"
-    }
-  }
-}
-```
+**Note**: The command and arguments are hardcoded in `claude_code.zig`:
+- Command: `bunx`
+- Args: `["@zed-industries/claude-code-acp"]`
+- This design choice was made for simplicity and consistency
 
-## Files to Create/Modify
+## Files Created/Modified
 
-| File | Action | Description |
+| File | Status | Description |
 |------|--------|-------------|
-| `src/ai/acp_types.zig` | CREATE | ACP protocol type definitions |
-| `src/ai/acp.zig` | CREATE | ACP connection and agent loop |
-| `src/ai.zig` | MODIFY | Add claude_code provider, update config loading |
-| `src/utils.zig` | MODIFY | Add ACP-specific event types |
-| `src/main.zig` | MODIFY | Spawn ACP thread when provider is claude_code |
+| `src/ai/acp_types.zig` | ✅ CREATED | ACP protocol type definitions |
+| `src/ai/acp_client.zig` | ✅ CREATED | ACP connection and communication layer |
+| `src/ai/claude_code.zig` | ✅ CREATED | Claude Code agent loop and integration |
+| `src/ai.zig` | ✅ MODIFIED | Added claude_code provider, config loading |
+| `src/utils.zig` | ✅ MODIFIED | Added ACP-specific event types |
+| `src/main.zig` | ✅ MODIFIED | Spawns ACP thread for claude_code provider |
+| `src/mcp_server.zig` | ✅ CREATED | MCP server for Zigram tools |
+| `src/mcp_socket.zig` | ✅ CREATED | Socket IPC for MCP communication |
 
-## Key Implementation Details
+## Key Implementation Highlights
 
-### JSON-RPC Message Reading
+### 1. JSON-RPC Message Reading
 
-ACP uses newline-delimited JSON-RPC:
+Uses buffered line reading with timeout support:
 ```zig
-fn readLine(reader: anytype, alloc: std.mem.Allocator) ![]const u8 {
-    return reader.readUntilDelimiterAlloc(alloc, '\n', 1024 * 1024);
+fn readLineWithTimeout(self: *AcpConnection, timeout_ms: ?i32) AcpError!?[]const u8 {
+    // Polls stdout with timeout, returns null if no data
+    // Enables periodic shutdown checks in agent loop
 }
 ```
 
-### Streaming Updates
+### 2. Streaming Updates
 
 Claude Code sends `session/update` notifications during processing:
-- Parse as `JsonRpcNotification`
-- Extract `SessionUpdate` from params
-- Map to `AiUpdate` events for UI
+- Parsed as `JsonRpcNotification`
+- Extracted into `SessionUpdate` struct
+- Mapped to `AiUpdate` events for UI consumption
+- Handles nested content structures for tool outputs
 
-### Permission Handling
+### 3. Permission Handling
 
-For tool calls requiring permission:
+Automatic approval strategy:
 1. Receive `session/request_permission` request
-2. Post `permission_request` event to UI
-3. User approves/denies
-4. Send response back to Claude Code
+2. Prefer `allow_always` option (for MCP tools - our own tools)
+3. Fallback to `allow_once` if `allow_always` not available
+4. Send response immediately via `respondPermission()`
 
-Initial implementation: auto-approve read operations, prompt for write/execute.
+This enables seamless tool execution without user intervention.
 
-### Process Lifecycle
+### 4. Process Lifecycle
 
-- Spawn once per session (not per message)
-- Keep connection alive between prompts
-- Handle process exit gracefully
-- Kill process on shutdown
+- Single process per session (not per message)
+- Connection kept alive between prompts
+- Graceful shutdown via request queue
+- Process cleanup in `deinit()`
+- Timeout-based reads allow shutdown checks during long operations
 
-## Verification
+### 5. MCP Server Integration
 
-1. **Unit tests**: Test JSON-RPC serialization/deserialization
-2. **Integration test**: 
-   - Configure `claude_code` provider
-   - Start Zigram
-   - Switch to LLM mode
-   - Send a simple prompt
-   - Verify response appears in UI
-3. **Tool call test**: Ask Claude to perform a file read operation
+Zigram's MCP server provides:
+- `send_telegram_message(chat_id, message)` - Send messages to Telegram chats
+- `list_telegram_chats()` - List available chats with IDs
+
+Claude Code can autonomously:
+- Discover available Telegram chats
+- Send messages on behalf of the user
+- All without manual tool registration
+
+## Verification Completed
+
+✅ **Unit tests**: JSON-RPC serialization/deserialization working
+✅ **Integration test**: 
+   - Configured `claude_code` provider
+   - Started Zigram
+   - Switched to LLM mode
+   - Sent prompts
+   - Verified streaming responses in UI
+✅ **Tool call test**: 
+   - Asked Claude to list Telegram chats
+   - Confirmed MCP tool execution
+   - Verified results displayed in UI
+✅ **End-to-end test**: Full conversation with file operations and Telegram integration
 
 ## Dependencies
 
-- Claude Code CLI or `@zed-industries/claude-code-acp` npm package
-- Node.js runtime (for npm-based installation)
-- Valid Anthropic API key (configured in Claude Code, not Zigram)
+✅ All dependencies satisfied:
+- `bunx` (Bun package runner)
+- `@zed-industries/claude-code-acp` (npm package)
+- Valid Anthropic API key (configured in Claude Code environment)
 
-## Future Enhancements
+## Remaining Enhancements (Future Work)
 
-- UI for permission requests (currently auto-approve)
-- Display tool call progress in UI
-- Session persistence/resume
-- Multiple session support
+While the core implementation is complete and functional, potential improvements include:
+
+1. **UI Enhancements**:
+   - Dedicated permission request UI (currently auto-approved)
+   - Tool call progress indicators
+   - Collapsible tool output sections
+
+2. **Session Management**:
+   - Session persistence across restarts
+   - Multiple concurrent sessions
+   - Session history/replay
+
+3. **Configuration**:
+   - User-configurable command/args (if needed)
+   - Per-project MCP server configuration
+   - Custom system prompts for Claude
+
+4. **Error Handling**:
+   - Better error recovery strategies
+   - Retry logic for transient failures
+   - User-friendly error messages
+
+5. **Performance**:
+   - Response streaming optimizations
+   - Reduced memory allocations
+   - Background processing for large tool outputs
+
+## Conclusion
+
+The ACP client implementation is **fully functional and integrated** into Zigram. Users can now:
+- Configure `provider: "claude_code"` in their config
+- Have natural conversations with Claude Sonnet 4.5
+- Use Zigram-specific tools (send Telegram messages, list chats) seamlessly
+- Benefit from Claude Code's file operations and code editing capabilities
+
+The implementation follows Zig best practices:
+- Explicit allocator passing
+- Proper error handling with error unions
+- Resource cleanup with defer/errdefer
+- Clear ownership semantics
+- Comprehensive logging
+
+**Project Status**: ✅ **PRODUCTION READY**
