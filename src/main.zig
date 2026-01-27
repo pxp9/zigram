@@ -64,7 +64,7 @@ pub fn main() !void {
     const tdlib_log_path = try std.fs.path.join(alloc, &[_][]const u8{ log_dir, "tdlib.log" });
     defer alloc.free(tdlib_log_path);
     try tdlib.setLogStream(alloc, tdlib_log_path);
-    try tdlib.setLogVerbosityLevel(5);
+    try tdlib.setLogVerbosityLevel(alloc, 5);
 
     const client = try tdlib.Client.create();
     defer client.destroy();

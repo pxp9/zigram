@@ -1,4 +1,5 @@
 const std = @import("std");
+const utils = @import("utils.zig");
 
 pub const c = @cImport({
     @cInclude("td/telegram/td_json_client.h");
@@ -31,26 +32,29 @@ pub const Client = opaque {
     }
 };
 
-pub fn setLogVerbosityLevel(level: i32) !void {
-    var buffer: [256]u8 = undefined;
-    const request = try std.fmt.bufPrintZ(
-        &buffer,
-        "{{\"@type\":\"setLogVerbosityLevel\",\"new_verbosity_level\":{d}}}",
-        .{level},
-    );
+pub fn setLogVerbosityLevel(allocator: std.mem.Allocator, level: i32) !void {
+    const request_obj = .{
+        .@"@type" = "setLogVerbosityLevel",
+        .new_verbosity_level = level,
+    };
+
+    const request = try utils.formatJsonZ(allocator, request_obj);
+    defer allocator.free(request);
 
     _ = Client.execute(request);
 }
 
 pub fn setLogStream(allocator: std.mem.Allocator, file_path: []const u8) !void {
-    const request_str = try std.fmt.allocPrint(
-        allocator,
-        "{{\"@type\":\"setLogStream\",\"log_stream\":{{\"@type\":\"logStreamFile\",\"path\":\"{s}\",\"max_file_size\":10485760}}}}",
-        .{file_path},
-    );
-    defer allocator.free(request_str);
+    const request_obj = .{
+        .@"@type" = "setLogStream",
+        .log_stream = .{
+            .@"@type" = "logStreamFile",
+            .path = file_path,
+            .max_file_size = 10485760,
+        },
+    };
 
-    const request = try allocator.dupeZ(u8, request_str);
+    const request = try utils.formatJsonZ(allocator, request_obj);
     defer allocator.free(request);
 
     _ = Client.execute(request);

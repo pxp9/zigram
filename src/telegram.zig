@@ -29,22 +29,16 @@ pub const Message = struct {
     }
 };
 
-fn formatRequestZ(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![:0]u8 {
-    const str = try std.fmt.allocPrint(allocator, fmt, args);
-    defer allocator.free(str);
-    return try allocator.dupeZ(u8, str);
-}
-
 pub fn getUserName(
     client: *tdlib.Client,
     allocator: std.mem.Allocator,
     user_id: i64,
 ) ![]const u8 {
-    const request = try formatRequestZ(
-        allocator,
-        "{{\"@type\":\"getUser\",\"user_id\":{d}}}",
-        .{user_id},
-    );
+    const request_obj = .{
+        .@"@type" = "getUser",
+        .user_id = user_id,
+    };
+    const request = try utils.formatJsonZ(allocator, request_obj);
     defer allocator.free(request);
     client.send(request);
 
@@ -89,11 +83,14 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32)
         chats.deinit(allocator);
     }
 
-    const load_request = try formatRequestZ(
-        allocator,
-        "{{\"@type\":\"loadChats\",\"chat_list\":{{\"@type\":\"chatListMain\"}},\"limit\":{d}}}",
-        .{limit},
-    );
+    const load_request_obj = .{
+        .@"@type" = "loadChats",
+        .chat_list = .{
+            .@"@type" = "chatListMain",
+        },
+        .limit = limit,
+    };
+    const load_request = try utils.formatJsonZ(allocator, load_request_obj);
     defer allocator.free(load_request);
     std.log.info("Sending loadChats request: {s}", .{load_request});
     client.send(load_request);
@@ -121,11 +118,14 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32)
         }
     }
 
-    const request = try formatRequestZ(
-        allocator,
-        "{{\"@type\":\"getChats\",\"chat_list\":{{\"@type\":\"chatListMain\"}},\"limit\":{d}}}",
-        .{limit},
-    );
+    const request_obj = .{
+        .@"@type" = "getChats",
+        .chat_list = .{
+            .@"@type" = "chatListMain",
+        },
+        .limit = limit,
+    };
+    const request = try utils.formatJsonZ(allocator, request_obj);
     defer allocator.free(request);
     std.log.info("Sending getChats request: {s}", .{request});
     client.send(request);
@@ -176,11 +176,11 @@ pub fn getChats(client: *tdlib.Client, allocator: std.mem.Allocator, limit: i32)
                 for (chat_ids.array.items) |chat_id_value| {
                     const chat_id = chat_id_value.integer;
                     std.log.info("Requesting details for chat ID: {d}", .{chat_id});
-                    const chat_request = try formatRequestZ(
-                        allocator,
-                        "{{\"@type\":\"getChat\",\"chat_id\":{d}}}",
-                        .{chat_id},
-                    );
+                    const chat_request_obj = .{
+                        .@"@type" = "getChat",
+                        .chat_id = chat_id,
+                    };
+                    const chat_request = try utils.formatJsonZ(allocator, chat_request_obj);
                     defer allocator.free(chat_request);
                     client.send(chat_request);
                 }
@@ -277,11 +277,14 @@ pub fn getChatHistory(
     }
     std.log.info("Drained {d} pending updates", .{drain_count});
 
-    const request = try formatRequestZ(
-        allocator,
-        "{{\"@type\":\"getChatHistory\",\"chat_id\":{d},\"from_message_id\":0,\"offset\":0,\"limit\":{d}}}",
-        .{ chat_id, limit },
-    );
+    const request_obj = .{
+        .@"@type" = "getChatHistory",
+        .chat_id = chat_id,
+        .from_message_id = 0,
+        .offset = 0,
+        .limit = limit,
+    };
+    const request = try utils.formatJsonZ(allocator, request_obj);
     defer allocator.free(request);
     std.log.info("Sending getChatHistory request for chat {d}: {s}", .{ chat_id, request });
     client.send(request);

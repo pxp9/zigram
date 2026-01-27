@@ -73,12 +73,6 @@ fn askPassword(prompt: []const u8, allocator: std.mem.Allocator) ![]u8 {
     return try allocator.dupe(u8, trimmed);
 }
 
-fn formatRequestZ(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![:0]u8 {
-    const str = try std.fmt.allocPrint(allocator, fmt, args);
-    defer allocator.free(str);
-    return try allocator.dupeZ(u8, str);
-}
-
 fn handleAuthorizationState(
     client: *tdlib.Client,
     auth_state: std.json.Value,
@@ -111,22 +105,22 @@ fn handleAuthorizationState(
         const phone = try askUser("Enter your phone number (with country code):", allocator);
         defer allocator.free(phone);
 
-        const request = try formatRequestZ(
-            allocator,
-            "{{\"@type\":\"setAuthenticationPhoneNumber\",\"phone_number\":\"{s}\"}}",
-            .{phone},
-        );
+        const request_obj = .{
+            .@"@type" = "setAuthenticationPhoneNumber",
+            .phone_number = phone,
+        };
+        const request = try utils.formatJsonZ(allocator, request_obj);
         defer allocator.free(request);
         client.send(request);
     } else if (std.mem.eql(u8, state_str, "authorizationStateWaitCode")) {
         const code = try askUser("Enter the verification code:", allocator);
         defer allocator.free(code);
 
-        const request = try formatRequestZ(
-            allocator,
-            "{{\"@type\":\"checkAuthenticationCode\",\"code\":\"{s}\"}}",
-            .{code},
-        );
+        const request_obj = .{
+            .@"@type" = "checkAuthenticationCode",
+            .code = code,
+        };
+        const request = try utils.formatJsonZ(allocator, request_obj);
         defer allocator.free(request);
         client.send(request);
     } else if (std.mem.eql(u8, state_str, "authorizationStateWaitPassword")) {
@@ -177,7 +171,10 @@ pub fn authenticate(client: *tdlib.Client, allocator: std.mem.Allocator) !User {
                 is_authorized = try handleAuthorizationState(client, auth_state, allocator);
 
                 if (is_authorized) {
-                    const request = try allocator.dupeZ(u8, "{\"@type\":\"getMe\"}");
+                    const request_obj = .{
+                        .@"@type" = "getMe",
+                    };
+                    const request = try utils.formatJsonZ(allocator, request_obj);
                     defer allocator.free(request);
                     client.send(request);
                 }
