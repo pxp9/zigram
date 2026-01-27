@@ -1,5 +1,6 @@
 const std = @import("std");
 const tdlib = @import("tdlib.zig");
+const utils = @import("utils.zig");
 
 pub const User = struct {
     id: i64,
@@ -91,12 +92,19 @@ fn handleAuthorizationState(
         const api_hash = std.posix.getenv("API_HASH") orelse "a3406de8d171bb422bb6ddf3bbd800e2";
         const api_id = try std.fmt.parseInt(i32, api_id_str, 10);
 
-        const request = try formatRequestZ(
-            allocator,
-            \\{{"@type":"setTdlibParameters","database_directory":".data/tdlib","use_test_dc":false,"api_id":{d},"api_hash":"{s}","system_language_code":"en","device_model":"Desktop","application_version":"0.1.0","use_message_database":true,"use_secret_chats":false}}
-        ,
-            .{ api_id, api_hash },
-        );
+        const request_obj = .{
+            .@"@type" = "setTdlibParameters",
+            .database_directory = ".data/tdlib",
+            .use_test_dc = false,
+            .api_id = api_id,
+            .api_hash = api_hash,
+            .system_language_code = "en",
+            .device_model = "Desktop",
+            .application_version = "0.1.0",
+            .use_message_database = true,
+            .use_secret_chats = false,
+        };
+        const request = try utils.formatJsonZ(allocator, request_obj);
         defer allocator.free(request);
         client.send(request);
     } else if (std.mem.eql(u8, state_str, "authorizationStateWaitPhoneNumber")) {
@@ -125,11 +133,11 @@ fn handleAuthorizationState(
         const password = try askPassword("Enter your 2FA password:", allocator);
         defer allocator.free(password);
 
-        const request = try formatRequestZ(
-            allocator,
-            "{{\"@type\":\"checkAuthenticationPassword\",\"password\":\"{s}\"}}",
-            .{password},
-        );
+        const request_obj = .{
+            .@"@type" = "checkAuthenticationPassword",
+            .password = password,
+        };
+        const request = try utils.formatJsonZ(allocator, request_obj);
         defer allocator.free(request);
         client.send(request);
     } else if (std.mem.eql(u8, state_str, "authorizationStateReady")) {

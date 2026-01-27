@@ -54,6 +54,8 @@ pub const AcpConnection = struct {
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
+        // Make the child its own process group leader so we can kill the entire group
+        child.pgid = 0;
 
         if (cwd) |dir| {
             child.cwd = dir;
@@ -88,7 +90,17 @@ pub const AcpConnection = struct {
         if (self.session_id) |sid| {
             self.alloc.free(sid);
         }
-        _ = self.process.kill() catch {};
+        // Kill the entire process group to ensure child processes (MCP servers) are also killed
+        if (self.process.id) |pid| {
+            // Negative PID kills the process group
+            std.posix.kill(-@as(i32, @intCast(pid)), std.posix.SIG.KILL) catch {
+                // Fallback to killing just the process
+                _ = self.process.kill() catch {};
+            };
+        } else {
+            _ = self.process.kill() catch {};
+        }
+        _ = self.process.wait() catch {};
         self.alloc.destroy(self);
     }
 

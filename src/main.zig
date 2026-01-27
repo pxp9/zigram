@@ -54,7 +54,17 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    try tdlib.setLogVerbosityLevel(0);
+    // Set up TDLib logging before creating client
+    const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
+    const log_dir = try std.fs.path.join(alloc, &[_][]const u8{ home, ".local", "share", "zigram" });
+    defer alloc.free(log_dir);
+    std.fs.makeDirAbsolute(log_dir) catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
+    const tdlib_log_path = try std.fs.path.join(alloc, &[_][]const u8{ log_dir, "tdlib.log" });
+    defer alloc.free(tdlib_log_path);
+    try tdlib.setLogStream(alloc, tdlib_log_path);
+    try tdlib.setLogVerbosityLevel(5);
 
     const client = try tdlib.Client.create();
     defer client.destroy();
@@ -110,12 +120,6 @@ pub fn main() !void {
         llm_messages.deinit(alloc);
     }
 
-    const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
-    const log_dir = try std.fs.path.join(alloc, &[_][]const u8{ home, ".local", "share", "zigram" });
-    defer alloc.free(log_dir);
-    std.fs.makeDirAbsolute(log_dir) catch |err| {
-        if (err != error.PathAlreadyExists) return err;
-    };
     const log_file_path = try std.fs.path.join(alloc, &[_][]const u8{ log_dir, "zigram.log" });
     defer alloc.free(log_file_path);
 
@@ -125,15 +129,20 @@ pub fn main() !void {
 
     std.log.info("Zigram started", .{});
     std.log.info("Log file: {s}", .{log_file_path});
+    std.log.info("TDLib log file: {s}", .{tdlib_log_path});
 
     var telegram_queue = telegram.TelegramQueue.init(alloc);
     defer telegram_queue.deinit();
+
+    var confirmation_queue = mcp_socket.MessageConfirmationQueue.init(alloc);
+    defer confirmation_queue.deinit();
 
     const tg_ctx = TelegramThreadContext{
         .client = client,
         .loop = &loop,
         .request_queue = &telegram_queue,
         .alloc = alloc,
+        .confirmation_queue = &confirmation_queue,
     };
     const tg_thread = try std.Thread.spawn(.{}, telegram.telegramUpdateLoop, .{tg_ctx});
     defer tg_thread.join();
@@ -192,6 +201,12 @@ pub fn main() !void {
     var self_exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     var mcp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
 
+    // MCP server state (used only for Claude Code)
+    var mcp_server: ?mcp_socket.McpSocketServer = null;
+    var mcp_running: bool = true;
+    var mcp_thread: ?std.Thread = null;
+    var mcp_process_id: ?std.process.Child.Id = null;
+
     // Spawn AI thread based on provider type
     const ai_thread = switch (ai_config) {
         .google_ai => blk: {
@@ -205,22 +220,22 @@ pub fn main() !void {
         },
         .claude_code => |*cfg| blk: {
             // Start MCP socket server for tool execution
-            var mcp_server = mcp_socket.McpSocketServer.init(alloc, mcp_socket.default_socket_path) catch |err| {
+            mcp_server = mcp_socket.McpSocketServer.init(alloc, mcp_socket.default_socket_path) catch |err| {
                 std.log.err("Failed to start MCP socket server: {any}", .{err});
                 return err;
             };
-            var mcp_running = true;
 
             const mcp_ctx = mcp_socket.McpSocketContext{
-                .server = &mcp_server,
+                .server = &(mcp_server.?),
                 .telegram_queue = &telegram_queue,
                 .chats = &chats,
                 .alloc = alloc,
                 .running = &mcp_running,
+                .mcp_process_id = &mcp_process_id,
+                .confirmation_queue = &confirmation_queue,
             };
 
-            const mcp_thread = try std.Thread.spawn(.{}, mcp_socket.mcpSocketThread, .{mcp_ctx});
-            _ = mcp_thread;
+            mcp_thread = try std.Thread.spawn(.{}, mcp_socket.mcpSocketThread, .{mcp_ctx});
 
             // Get absolute path to zigram-mcp binary (same directory as zigram executable)
             const self_exe_dir = std.fs.selfExeDirPath(&self_exe_buf) catch {
@@ -246,7 +261,35 @@ pub fn main() !void {
             break :blk try std.Thread.spawn(.{}, ai.acpAgentLoop, .{acp_ctx});
         },
     };
-    defer ai_thread.join();
+
+    defer {
+        std.log.info("Starting cleanup defer block", .{});
+
+        // Kill zigram-mcp process first
+        if (mcp_process_id) |pid| {
+            std.log.info("Killing zigram-mcp process: {d}", .{pid});
+            std.posix.kill(pid, std.posix.SIG.KILL) catch |err| {
+                std.log.warn("Failed to kill zigram-mcp process: {any}", .{err});
+            };
+        }
+
+        // Shutdown MCP socket thread and server
+        if (mcp_thread) |thread| {
+            std.log.info("Shutting down MCP socket thread", .{});
+            mcp_running = false;
+            if (mcp_server) |*server| {
+                server.deinit();
+            }
+            std.log.info("Waiting for MCP socket thread to join", .{});
+            thread.join();
+            std.log.info("MCP socket thread joined", .{});
+        }
+
+        // Join AI thread last
+        std.log.info("Waiting for AI thread to join", .{});
+        ai_thread.join();
+        std.log.info("AI thread joined", .{});
+    }
 
     while (true) {
         const event = loop.nextEvent();
@@ -299,14 +342,20 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
         .focus_out => {},
         .mouse => {},
         .telegram_update => |update| {
-            defer alloc.free(update.data);
+            defer switch (update.data) {
+                .json => |json| alloc.free(json),
+                .message => |msg| {
+                    var m = msg;
+                    m.deinit(alloc);
+                },
+            };
 
             switch (update.kind) {
                 .chats_loaded => {
                     const parsed = std.json.parseFromSlice(
                         std.json.Value,
                         alloc,
-                        update.data,
+                        update.data.json,
                         .{},
                     ) catch {
                         std.log.err("Failed to parse chats data", .{});
@@ -359,7 +408,7 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                     const parsed = std.json.parseFromSlice(
                         std.json.Value,
                         alloc,
-                        update.data,
+                        update.data.json,
                         .{},
                     ) catch {
                         std.log.err("Failed to parse chat history data", .{});
@@ -405,11 +454,39 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                     try state.chat_messages_cache.put(update.chat_id, messages);
                     std.log.info("Loaded {d} messages for chat {d}", .{ messages.items.len, update.chat_id });
                 },
+                .message_sent => {
+                    const message = update.data.message;
+                    const cached_messages = state.chat_messages_cache.getPtr(update.chat_id) orelse return 1;
+
+                    const win_height = state.vx.window().height;
+                    const panel_height = if (win_height > 4) win_height - 2 else 2;
+                    const messages_height = if (panel_height > 6) panel_height - 8 else 1;
+                    const buffer_rows = state.chat_text_buffer.rows;
+                    const max_scroll = buffer_rows -| messages_height;
+                    const current_scroll = state.chat_text_view.scroll_view.scroll.y;
+                    const threshold: usize = 3;
+                    const is_at_bottom = (current_scroll +| threshold >= max_scroll) or buffer_rows <= messages_height;
+
+                    cached_messages.append(alloc, telegram.Message{
+                        .id = message.id,
+                        .sender_name = try alloc.dupe(u8, message.sender_name),
+                        .content = try alloc.dupe(u8, message.content),
+                        .is_outgoing = message.is_outgoing,
+                        .timestamp = message.timestamp,
+                    }) catch return 1;
+
+                    if (is_at_bottom) {
+                        const message_lines = 1 + std.mem.count(u8, message.content, "\n");
+                        state.chat_text_view.scroll_view.scroll.y +|= message_lines;
+                    }
+
+                    std.log.info("Added sent message to chat {d}: {s}", .{ update.chat_id, message.content });
+                },
                 .new_message => {
                     const parsed = std.json.parseFromSlice(
                         std.json.Value,
                         alloc,
-                        update.data,
+                        update.data.json,
                         .{},
                     ) catch return 1;
                     defer parsed.deinit();

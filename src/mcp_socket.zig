@@ -1,8 +1,50 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const telegram = @import("telegram.zig");
 const utils = @import("utils.zig");
 
 const log = std.log.scoped(.mcp_socket);
+
+pub const MessageConfirmation = struct {
+    chat_id: i64,
+    success: bool,
+    message_id: i64,
+};
+
+pub const MessageConfirmationQueue = utils.Queue(MessageConfirmation);
+
+// Cross-platform peer credentials
+const Ucred = extern struct {
+    pid: std.process.Child.Id,
+    uid: u32,
+    gid: u32,
+};
+
+fn getPeerPid(socket: std.posix.socket_t) ?std.process.Child.Id {
+    switch (builtin.os.tag) {
+        .linux => {
+            const SO_PEERCRED = 17;
+            var cred: Ucred = undefined;
+            var cred_len: std.posix.socklen_t = @sizeOf(Ucred);
+            const result = std.posix.system.getsockopt(socket, std.posix.SOL.SOCKET, SO_PEERCRED, @ptrCast(&cred), &cred_len);
+            if (result == 0) {
+                return cred.pid;
+            }
+            return null;
+        },
+        .macos => {
+            const LOCAL_PEERPID = 0x002;
+            var pid: std.process.Child.Id = undefined;
+            var pid_len: std.posix.socklen_t = @sizeOf(std.process.Child.Id);
+            const result = std.posix.system.getsockopt(socket, 0, LOCAL_PEERPID, @ptrCast(&pid), &pid_len);
+            if (result == 0) {
+                return pid;
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
 
 pub const McpSocketServer = struct {
     socket: std.posix.socket_t,
@@ -13,8 +55,8 @@ pub const McpSocketServer = struct {
         // Remove existing socket file
         std.fs.deleteFileAbsolute(path) catch {};
 
-        // Create Unix socket
-        const socket = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+        // Create Unix socket with NONBLOCK so accept() doesn't block forever
+        const socket = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK, 0);
         errdefer std.posix.close(socket);
 
         // Bind to path
@@ -51,16 +93,21 @@ pub const McpSocketContext = struct {
     chats: *std.ArrayList(telegram.Chat),
     alloc: std.mem.Allocator,
     running: *bool,
+    mcp_process_id: *?std.process.Child.Id,
+    confirmation_queue: *MessageConfirmationQueue,
 };
 
 pub fn mcpSocketThread(ctx: McpSocketContext) void {
     log.info("MCP socket thread started", .{});
 
     while (ctx.running.*) {
-        // Accept connection with timeout check
         const client = ctx.server.accept() catch |err| {
+            if (!ctx.running.*) {
+                break;
+            }
             if (err == error.WouldBlock) {
-                std.Thread.yield() catch {};
+                // Non-blocking socket, sleep briefly to avoid busy-waiting
+                std.Thread.sleep(10 * std.time.ns_per_ms);
                 continue;
             }
             log.err("Accept failed: {any}", .{err});
@@ -78,6 +125,17 @@ pub fn mcpSocketThread(ctx: McpSocketContext) void {
 
 fn handleClient(ctx: McpSocketContext, client: std.posix.socket_t) !void {
     log.info("MCP socket: client connected", .{});
+
+    // Get peer credentials to capture the process ID
+    if (ctx.mcp_process_id.* == null) {
+        if (getPeerPid(client)) |pid| {
+            ctx.mcp_process_id.* = pid;
+            log.info("MCP socket: captured zigram-mcp process ID: {d}", .{pid});
+        } else {
+            log.warn("MCP socket: failed to get peer credentials", .{});
+        }
+    }
+
     var buf: [65536]u8 = undefined;
     var total: usize = 0;
 
@@ -166,8 +224,37 @@ fn executeSendMessage(ctx: McpSocketContext, arguments: ?std.json.Value) []const
         return "Error: Failed to queue message";
     };
 
-    log.info("Queued message to chat {d}", .{chat_id});
-    return "Message sent successfully";
+    log.info("Queued message to chat {d}, waiting for confirmation...", .{chat_id});
+
+    // Wait for confirmation from telegram thread (timeout after 30 seconds)
+    var attempts: u32 = 0;
+    while (attempts < 300) : (attempts += 1) {
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+
+        if (ctx.confirmation_queue.next()) |confirmation| {
+            log.info("MCP thread received confirmation for chat {d} (expected {d})", .{ confirmation.chat_id, chat_id });
+            if (confirmation.chat_id == chat_id) {
+                if (confirmation.success) {
+                    log.info("Message confirmed for chat {d}, message_id={d}", .{ chat_id, confirmation.message_id });
+                    return "Message sent successfully";
+                } else {
+                    log.err("Message failed for chat {d}", .{chat_id});
+                    return "Error: Failed to send message";
+                }
+            } else {
+                // Not our confirmation, put it back
+                log.warn("Received confirmation for wrong chat {d}, putting back", .{confirmation.chat_id});
+                ctx.confirmation_queue.post(confirmation) catch {};
+            }
+        }
+
+        if (attempts % 50 == 0 and attempts > 0) {
+            log.info("Still waiting for confirmation (attempt {d}/300)...", .{attempts});
+        }
+    }
+
+    log.warn("Timeout waiting for confirmation for chat {d}", .{chat_id});
+    return "Error: Timeout waiting for confirmation";
 }
 
 fn executeListChats(ctx: McpSocketContext) []const u8 {

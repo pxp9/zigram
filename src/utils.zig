@@ -28,6 +28,7 @@ pub const TelegramThreadContext = struct {
     loop: *vaxis.Loop(Event),
     request_queue: *TelegramQueue,
     alloc: std.mem.Allocator,
+    confirmation_queue: ?*@import("mcp_socket.zig").MessageConfirmationQueue = null,
 };
 
 pub const AiThreadContext = struct {
@@ -82,6 +83,12 @@ pub fn Queue(comptime T: type) type {
             return self.requests.items[0];
         }
     };
+}
+
+pub fn formatJsonZ(allocator: std.mem.Allocator, obj: anytype) ![:0]u8 {
+    const json_str = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(obj, .{})});
+    defer allocator.free(json_str);
+    return try allocator.dupeZ(u8, json_str);
 }
 
 pub const AppState = struct {

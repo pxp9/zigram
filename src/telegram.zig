@@ -458,21 +458,76 @@ pub fn sendMessage(
     allocator: std.mem.Allocator,
     chat_id: i64,
     text: []const u8,
-) !void {
-    const request = try formatRequestZ(
-        allocator,
-        \\{{"@type":"sendMessage","chat_id":{d},"input_message_content":{{"@type":"inputMessageText","text":{{"@type":"formattedText","text":"{s}"}}}}}}
-    ,
-        .{ chat_id, text },
-    );
+) !Message {
+    // Build request using proper JSON formatting to escape special characters
+    const request_obj = .{
+        .@"@type" = "sendMessage",
+        .chat_id = chat_id,
+        .input_message_content = .{
+            .@"@type" = "inputMessageText",
+            .text = .{
+                .@"@type" = "formattedText",
+                .text = text,
+            },
+        },
+    };
+
+    const request = try utils.formatJsonZ(allocator, request_obj);
     defer allocator.free(request);
+
     std.log.info("Sending message to TDLib: chat_id={d}, text={s}", .{ chat_id, text });
     client.send(request);
-    std.log.info("Message sent to TDLib successfully", .{});
+
+    // Wait briefly for TDLib's direct response (usually arrives within 1-2 seconds)
+    var attempts: u32 = 0;
+    while (attempts < 20) : (attempts += 1) {
+        const response_opt = client.receive(0.1);
+        if (response_opt) |response| {
+            const parsed = std.json.parseFromSlice(
+                std.json.Value,
+                allocator,
+                response,
+                .{},
+            ) catch continue;
+            defer parsed.deinit();
+
+            const value = parsed.value;
+            const response_type = value.object.get("@type") orelse continue;
+
+            // TDLib returns a "message" object as direct response to sendMessage
+            if (std.mem.eql(u8, response_type.string, "message")) {
+                const msg_chat_id = value.object.get("chat_id") orelse continue;
+                if (msg_chat_id.integer == chat_id) {
+                    const msg_id = value.object.get("id") orelse continue;
+                    const timestamp = value.object.get("date") orelse continue;
+
+                    std.log.info("Message sent successfully, message_id={d}", .{msg_id.integer});
+
+                    // Construct Message struct for UI
+                    return Message{
+                        .id = msg_id.integer,
+                        .sender_name = try allocator.dupe(u8, "You"),
+                        .content = try allocator.dupe(u8, text),
+                        .is_outgoing = true,
+                        .timestamp = timestamp.integer,
+                    };
+                }
+            } else if (std.mem.eql(u8, response_type.string, "error")) {
+                const code = value.object.get("code");
+                const message = value.object.get("message");
+                std.log.err("TDLib error sending message: code={any}, message={s}", .{ code, if (message) |m| m.string else "unknown" });
+                return error.TDLibError;
+            }
+        }
+    }
+
+    std.log.warn("Timeout waiting for sendMessage response, message likely still sending", .{});
+    return error.Timeout;
 }
 
 pub const TelegramUpdateKind = enum {
     new_message,
+    message_sent,
     message_edited,
     message_deleted,
     chat_updated,
@@ -485,7 +540,10 @@ pub const TelegramUpdateKind = enum {
 pub const TelegramUpdate = struct {
     kind: TelegramUpdateKind,
     chat_id: i64,
-    data: []const u8, // JSON string
+    data: union(enum) {
+        json: []const u8,
+        message: Message,
+    },
 };
 
 pub const TelegramRequestKind = enum {
@@ -522,7 +580,7 @@ pub fn telegramUpdateLoop(ctx: utils.TelegramThreadContext) void {
                         .telegram_update = .{
                             .kind = .chats_loaded,
                             .chat_id = 0,
-                            .data = data_copy,
+                            .data = .{ .json = data_copy },
                         },
                     });
 
@@ -545,7 +603,7 @@ pub fn telegramUpdateLoop(ctx: utils.TelegramThreadContext) void {
                         .telegram_update = .{
                             .kind = .chat_history_loaded,
                             .chat_id = req.chat_id,
-                            .data = data_copy,
+                            .data = .{ .json = data_copy },
                         },
                     });
 
@@ -556,10 +614,44 @@ pub fn telegramUpdateLoop(ctx: utils.TelegramThreadContext) void {
                 },
                 .send_message => |req| {
                     std.log.info("Processing send_message request, chat_id={d}", .{req.chat_id});
-                    sendMessage(ctx.client, ctx.alloc, req.chat_id, req.text) catch |err| {
+
+                    const message = sendMessage(ctx.client, ctx.alloc, req.chat_id, req.text) catch |err| {
                         std.log.err("Failed to send message: {any}", .{err});
+                        // Post failure confirmation if MCP is waiting
+                        if (ctx.confirmation_queue) |queue| {
+                            const mcp_socket = @import("mcp_socket.zig");
+                            queue.post(mcp_socket.MessageConfirmation{
+                                .chat_id = req.chat_id,
+                                .success = false,
+                                .message_id = 0,
+                            }) catch {};
+                        }
+                        ctx.alloc.free(req.text);
+                        continue;
                     };
                     ctx.alloc.free(req.text);
+
+                    // Post success confirmation immediately after TDLib confirms
+                    if (ctx.confirmation_queue) |queue| {
+                        const mcp_socket = @import("mcp_socket.zig");
+                        queue.post(mcp_socket.MessageConfirmation{
+                            .chat_id = req.chat_id,
+                            .success = true,
+                            .message_id = message.id,
+                        }) catch |err| {
+                            std.log.err("Failed to post message confirmation: {any}", .{err});
+                        };
+                        std.log.info("Posted immediate confirmation for chat {d}, message_id={d}", .{ req.chat_id, message.id });
+                    }
+
+                    // Post message_sent event to UI thread with the Message struct directly
+                    ctx.loop.postEvent(.{
+                        .telegram_update = .{
+                            .kind = .message_sent,
+                            .chat_id = req.chat_id,
+                            .data = .{ .message = message },
+                        },
+                    });
                 },
                 .shutdown => {
                     std.log.info("Telegram thread shutting down", .{});
@@ -569,7 +661,7 @@ pub fn telegramUpdateLoop(ctx: utils.TelegramThreadContext) void {
                         .telegram_update = .{
                             .kind = .thread_shutdown,
                             .chat_id = 0,
-                            .data = shutdown_msg,
+                            .data = .{ .json = shutdown_msg },
                         },
                     });
 
@@ -600,6 +692,24 @@ pub fn telegramUpdateLoop(ctx: utils.TelegramThreadContext) void {
                 if (msg_obj.object.get("chat_id")) |cid| {
                     chat_id = cid.integer;
                 }
+
+                // Check if this is an outgoing message and notify MCP server
+                if (msg_obj.object.get("is_outgoing")) |is_outgoing| {
+                    if (is_outgoing.bool and ctx.confirmation_queue != null) {
+                        const msg_id = msg_obj.object.get("id");
+                        if (msg_id) |mid| {
+                            const mcp_socket = @import("mcp_socket.zig");
+                            ctx.confirmation_queue.?.post(mcp_socket.MessageConfirmation{
+                                .chat_id = chat_id,
+                                .success = true,
+                                .message_id = mid.integer,
+                            }) catch |err| {
+                                std.log.err("Failed to post message confirmation: {any}", .{err});
+                            };
+                            std.log.info("Posted message confirmation for chat {d}, message_id={d}", .{ chat_id, mid.integer });
+                        }
+                    }
+                }
             }
         } else if (std.mem.eql(u8, update_type.string, "updateMessageEdited")) {
             kind = .message_edited;
@@ -627,7 +737,7 @@ pub fn telegramUpdateLoop(ctx: utils.TelegramThreadContext) void {
                 .telegram_update = .{
                     .kind = kind,
                     .chat_id = chat_id,
-                    .data = data_copy,
+                    .data = .{ .json = data_copy },
                 },
             });
         }
