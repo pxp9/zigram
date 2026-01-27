@@ -582,6 +582,110 @@ pub fn acpAgentLoop(ctx: AcpThreadContext) void {
     }
 }
 
+fn handleAcpNotification(ctx: AcpThreadContext, message: *AcpMessage) bool {
+    const method = message.getMethod() orelse return false;
+    log.info("Received notification: {s}", .{method});
+
+    if (!std.mem.eql(u8, method, "session/update")) return false;
+
+    const params = message.getParams() orelse {
+        log.err("session/update: missing params", .{});
+        return false;
+    };
+
+    const update = parseSessionUpdate(ctx.alloc, params) catch |err| {
+        log.err("Failed to parse session update: {any}", .{err});
+        return false;
+    };
+
+    log.info("Parsed session update: kind={s}", .{@tagName(update.kind)});
+    handleSessionUpdate(ctx, update);
+
+    return update.kind == .agent_turn_complete;
+}
+
+fn selectPermissionOption(perm_req: PermissionRequest) ?[]const u8 {
+    var allow_once_option: ?[]const u8 = null;
+
+    for (perm_req.options) |opt| {
+        log.info("  Option: {s} (kind: {s}, id: {s})", .{ opt.name, opt.kind, opt.optionId });
+        const kind = acp_types.PermissionOptionKind.fromString(opt.kind);
+        if (kind == .allow_always) {
+            return opt.optionId;
+        }
+        if (kind == .allow_once) {
+            allow_once_option = opt.optionId;
+        }
+    }
+
+    return allow_once_option;
+}
+
+fn handleAcpPermissionRequest(ctx: AcpThreadContext, conn: *AcpConnection, request_id: i64, message: *AcpMessage) void {
+    const params = message.getParams() orelse return;
+    log.info("Permission request received", .{});
+
+    const perm_req = parsePermissionRequest(ctx.alloc, request_id, params) catch |err| {
+        log.err("Failed to parse permission request: {any}", .{err});
+        return;
+    };
+    defer ctx.alloc.free(perm_req.options);
+
+    log.info("Permission request for tool_call_id: {s}, options: {d}", .{ perm_req.tool_call_id, perm_req.options.len });
+
+    const allow_option = selectPermissionOption(perm_req);
+    if (allow_option) |opt_id| {
+        log.info("Responding with option: {s}", .{opt_id});
+        conn.respondPermission(request_id, opt_id) catch |err| {
+            log.err("Failed to respond to permission request: {any}", .{err});
+        };
+    } else {
+        log.err("No allow option found in permission request", .{});
+    }
+}
+
+fn handleAcpRequest(ctx: AcpThreadContext, conn: *AcpConnection, message: *AcpMessage) void {
+    const method = message.getMethod() orelse return;
+    const request_id = message.getId() orelse return;
+
+    log.info("Received request: {s} (id: {d})", .{ method, request_id });
+
+    if (!std.mem.eql(u8, method, "session/request_permission")) return;
+
+    handleAcpPermissionRequest(ctx, conn, request_id, message);
+}
+
+fn handleAcpResponse(ctx: AcpThreadContext, message: *AcpMessage) bool {
+    log.info("Received response", .{});
+
+    if (message.getError()) |err| {
+        if (err.object.get("message")) |msg_val| {
+            log.err("Response error: {s}", .{msg_val.string});
+            const error_text = ctx.alloc.dupe(u8, msg_val.string) catch return true;
+            ctx.loop.postEvent(.{
+                .ai_update = .{
+                    .kind = .error_occurred,
+                    .data = error_text,
+                },
+            });
+        }
+        return true;
+    }
+
+    log.info("Prompt response received, turn complete", .{});
+    return true;
+}
+
+fn checkShutdownRequested(ctx: AcpThreadContext) bool {
+    if (ctx.request_queue.peek()) |req| {
+        if (req == .shutdown) {
+            log.info("Shutdown requested during message handling", .{});
+            return true;
+        }
+    }
+    return false;
+}
+
 fn handleSendMessage(ctx: AcpThreadContext, conn: *AcpConnection, session_id: []const u8, msg: anytype) void {
     defer ctx.alloc.free(msg.prompt);
 
@@ -594,121 +698,23 @@ fn handleSendMessage(ctx: AcpThreadContext, conn: *AcpConnection, session_id: []
     var agent_turn_complete = false;
 
     while (!agent_turn_complete) {
-        // Check for shutdown request
-        if (ctx.request_queue.peek()) |req| {
-            if (req == .shutdown) {
-                log.info("Shutdown requested during message handling", .{});
-                return;
-            }
-        }
+        if (checkShutdownRequested(ctx)) return;
 
-        // Use timeout so we can periodically check for shutdown
         var message = conn.readMessageWithTimeout(100) catch |err| {
             log.err("Failed to read message: {any}", .{err});
             postError(ctx, "Connection to Claude Code lost");
             return;
-        } orelse {
-            // Timeout or end of stream - continue to check shutdown
-            continue;
-        };
+        } orelse continue;
         defer message.deinit();
 
         if (message.isNotification()) {
-            const method = message.getMethod() orelse continue;
-            log.info("Received notification: {s}", .{method});
-
-            if (std.mem.eql(u8, method, "session/update")) {
-                const params = message.getParams() orelse {
-                    log.err("session/update: missing params", .{});
-                    continue;
-                };
-                const update = parseSessionUpdate(ctx.alloc, params) catch |err| {
-                    log.err("Failed to parse session update: {any}", .{err});
-                    continue;
-                };
-                log.info("Parsed session update: kind={s}", .{@tagName(update.kind)});
-                handleSessionUpdate(ctx, update);
-
-                // Check if this update signals the end of the agent's turn
-                if (update.kind == .agent_turn_complete) {
-                    log.info("Agent turn complete received", .{});
-                    agent_turn_complete = true;
-                }
+            if (handleAcpNotification(ctx, &message)) {
+                agent_turn_complete = true;
             }
         } else if (message.isRequest()) {
-            const method = message.getMethod() orelse continue;
-            const request_id = message.getId() orelse continue;
-
-            // Log raw request for debugging
-            const req_fmt = std.json.fmt(message.parsed.value, .{});
-            var req_out: std.Io.Writer.Allocating = .init(ctx.alloc);
-            defer req_out.deinit();
-            req_fmt.format(&req_out.writer) catch {};
-            const req_json = req_out.toOwnedSlice() catch "";
-            defer if (req_json.len > 0) ctx.alloc.free(req_json);
-            if (req_json.len > 0 and req_json.len < 2000) {
-                log.info("Raw request: {s}", .{req_json});
-            }
-
-            log.info("Received request: {s} (id: {d})", .{ method, request_id });
-
-            if (std.mem.eql(u8, method, "session/request_permission")) {
-                const params = message.getParams() orelse continue;
-                log.info("Permission request received", .{});
-                const perm_req = parsePermissionRequest(ctx.alloc, request_id, params) catch |err| {
-                    log.err("Failed to parse permission request: {any}", .{err});
-                    continue;
-                };
-                defer ctx.alloc.free(perm_req.options);
-
-                log.info("Permission request for tool_call_id: {s}, options: {d}", .{ perm_req.tool_call_id, perm_req.options.len });
-
-                // Prefer allow_always for MCP tools (our own tools), fallback to allow_once
-                var allow_option: ?[]const u8 = null;
-                var allow_once_option: ?[]const u8 = null;
-                for (perm_req.options) |opt| {
-                    log.info("  Option: {s} (kind: {s}, id: {s})", .{ opt.name, opt.kind, opt.optionId });
-                    const kind = acp_types.PermissionOptionKind.fromString(opt.kind);
-                    if (kind == .allow_always) {
-                        allow_option = opt.optionId;
-                        break;
-                    } else if (kind == .allow_once) {
-                        allow_once_option = opt.optionId;
-                    }
-                }
-                if (allow_option == null) {
-                    allow_option = allow_once_option;
-                }
-
-                if (allow_option) |opt_id| {
-                    log.info("Responding with option: {s}", .{opt_id});
-                    conn.respondPermission(request_id, opt_id) catch |err| {
-                        log.err("Failed to respond to permission request: {any}", .{err});
-                    };
-                } else {
-                    log.err("No allow option found in permission request", .{});
-                }
-            }
+            handleAcpRequest(ctx, conn, &message);
         } else if (message.isResponse()) {
-            log.info("Received response", .{});
-            if (message.getError()) |err| {
-                if (err.object.get("message")) |msg_val| {
-                    log.err("Response error: {s}", .{msg_val.string});
-                    const error_text = ctx.alloc.dupe(u8, msg_val.string) catch continue;
-                    ctx.loop.postEvent(.{
-                        .ai_update = .{
-                            .kind = .error_occurred,
-                            .data = error_text,
-                        },
-                    });
-                }
-                agent_turn_complete = true;
-            } else {
-                // The response to session/prompt indicates the turn is complete
-                // (the result contains the stop reason)
-                log.info("Prompt response received, turn complete", .{});
-                agent_turn_complete = true;
-            }
+            agent_turn_complete = handleAcpResponse(ctx, &message);
         }
     }
 
