@@ -44,6 +44,7 @@ You can customize keybindings by creating or editing
 ``` json
 {
   "ai": {
+    "enabled": true,
     "provider": "google_ai",
     "google_ai": {
       "api_key": "your_key",
@@ -114,7 +115,29 @@ You can customize how message timestamps are displayed using the `datetime_forma
 
 If the format string is invalid, Zigram will log an error and fall back to the default format. Press `Ctrl+R` to reload after changing the format.
 
-### AI System Prompt
+### AI Configuration
+
+#### Enabling/Disabling AI
+
+You can completely disable the AI assistant panel by setting `enabled` to `false` in your config file:
+
+``` json
+{
+  "ai": {
+    "enabled": false
+  }
+}
+```
+
+When AI is disabled:
+- The interface switches to a 2-panel layout (chat list + main chat)
+- The AI panel is hidden
+- Tab key cycles only between Chat and Chat List modes
+- No AI thread is spawned, reducing resource usage
+
+**Default**: AI is enabled if not specified.
+
+#### AI System Prompt
 
 You can customize the AI assistant's behavior by setting a `system_prompt` in your config file.
 
@@ -127,21 +150,21 @@ To override it, add `system_prompt` to the `google_ai` section in your config fi
 
 ## Usage Modes
 
-Zigram has three input modes:
+Zigram has three input modes (or two if AI is disabled):
 
 1. **Chat Mode**: Type and send messages in the selected chat
-2. **LLM Mode**: Interact with the AI assistant (right panel)
+2. **LLM Mode**: Interact with the AI assistant (right panel) - *only available when AI is enabled*
 3. **Chat List Mode**: Navigate and select chats
 
 Press `Tab` to cycle between modes.
 
 ## Panels
 
-The interface is divided into three panels:
+The interface is divided into three panels (or two if AI is disabled):
 
 - **Left Panel**: Chat list - shows your recent conversations
 - **Center Panel**: Main chat window - displays messages from the selected chat
-- **Right Panel**: AI Assistant - chat with an AI
+- **Right Panel**: AI Assistant - chat with an AI *(only shown when AI is enabled)*
 
 ## Log File
 
