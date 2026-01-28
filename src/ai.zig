@@ -27,11 +27,13 @@ pub const GoogleAiConfig = struct {
 pub const ClaudeCodeConfig = claude_code.ClaudeCodeConfig;
 
 pub const ProviderConfig = union(enum) {
+    disabled: void,
     google_ai: GoogleAiConfig,
     claude_code: ClaudeCodeConfig,
 
     pub fn deinit(self: *ProviderConfig, alloc: std.mem.Allocator) void {
         switch (self.*) {
+            .disabled => {},
             .google_ai => |*cfg| cfg.deinit(alloc),
             .claude_code => |*cfg| cfg.deinit(alloc),
         }
@@ -59,19 +61,26 @@ pub fn loadConfig(alloc: std.mem.Allocator) !ProviderConfig {
     defer parsed.deinit();
 
     const root = parsed.value;
-    if (root.object.get("ai")) |ai_obj| {
-        const provider_str = ai_obj.object.get("provider") orelse return error.NoProvider;
+    const ai_obj = root.object.get("ai") orelse return ProviderConfig{ .disabled = {} };
 
-        if (std.mem.eql(u8, provider_str.string, "google_ai")) {
-            const provider_config_json = ai_obj.object.get("google_ai") orelse return error.NoGoogleAiConfig;
-            return ProviderConfig{ .google_ai = try loadGoogleAiConfig(alloc, provider_config_json) };
-        } else if (std.mem.eql(u8, provider_str.string, "claude_code")) {
-            const provider_config_json = ai_obj.object.get("claude_code") orelse return error.NoClaudeCodeConfig;
-            return ProviderConfig{ .claude_code = try loadClaudeCodeConfig(alloc, provider_config_json) };
-        }
+    const enabled_val = ai_obj.object.get("enabled");
+    if (enabled_val != null and enabled_val.? == .bool and !enabled_val.?.bool) {
+        return ProviderConfig{ .disabled = {} };
     }
 
-    return error.NoAiConfig;
+    const provider_str = ai_obj.object.get("provider") orelse return error.NoProvider;
+
+    if (std.mem.eql(u8, provider_str.string, "google_ai")) {
+        const provider_config_json = ai_obj.object.get("google_ai") orelse return error.NoGoogleAiConfig;
+        return ProviderConfig{ .google_ai = try loadGoogleAiConfig(alloc, provider_config_json) };
+    }
+
+    if (std.mem.eql(u8, provider_str.string, "claude_code")) {
+        const provider_config_json = ai_obj.object.get("claude_code") orelse return error.NoClaudeCodeConfig;
+        return ProviderConfig{ .claude_code = try loadClaudeCodeConfig(alloc, provider_config_json) };
+    }
+
+    return error.NoProvider;
 }
 
 fn loadGoogleAiConfig(alloc: std.mem.Allocator, config_json: std.json.Value) !GoogleAiConfig {
@@ -100,6 +109,7 @@ fn loadClaudeCodeConfig(alloc: std.mem.Allocator, config_json: std.json.Value) !
 
 pub fn listModels(alloc: std.mem.Allocator, config: *const ProviderConfig) ![]const u8 {
     return switch (config.*) {
+        .disabled => try alloc.dupe(u8, "AI is disabled."),
         .google_ai => |*cfg| try google.listModels(alloc, cfg),
         .claude_code => try alloc.dupe(u8, "Claude Code does not support model listing. Models are configured in Claude Code itself."),
     };
@@ -107,6 +117,7 @@ pub fn listModels(alloc: std.mem.Allocator, config: *const ProviderConfig) ![]co
 
 pub fn sendMessageStreaming(alloc: std.mem.Allocator, config: *const ProviderConfig, history: []const ConversationMessage, loop: *vaxis.Loop(utils.Event)) ![]const u8 {
     return switch (config.*) {
+        .disabled => error.AiDisabled,
         .google_ai => |*cfg| try google.sendMessageStreaming(alloc, cfg, history, loop),
         .claude_code => error.UseAcpAgentLoop,
     };

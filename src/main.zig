@@ -150,6 +150,8 @@ pub fn main() !void {
     var ai_queue = ai.AiQueue.init(alloc);
     defer ai_queue.deinit();
 
+    var ai_enabled: bool = true;
+
     var chats: std.ArrayList(telegram.Chat) = .empty;
     defer {
         for (chats.items) |*chat| {
@@ -208,7 +210,11 @@ pub fn main() !void {
     var mcp_process_id: ?std.process.Child.Id = null;
 
     // Spawn AI thread based on provider type
-    const ai_thread = switch (ai_config) {
+    const ai_thread: ?std.Thread = switch (ai_config) {
+        .disabled => blk: {
+            ai_enabled = false;
+            break :blk null;
+        },
         .google_ai => blk: {
             const ai_ctx = AiThreadContext{
                 .config = &ai_config,
@@ -285,10 +291,12 @@ pub fn main() !void {
             std.log.info("MCP socket thread joined", .{});
         }
 
-        // Join AI thread last
-        std.log.info("Waiting for AI thread to join", .{});
-        ai_thread.join();
-        std.log.info("AI thread joined", .{});
+        // Join AI thread last (only if it exists)
+        if (ai_thread) |thread| {
+            std.log.info("Waiting for AI thread to join", .{});
+            thread.join();
+            std.log.info("AI thread joined", .{});
+        }
     }
 
     while (true) {
@@ -319,6 +327,7 @@ pub fn main() !void {
             .llm_input = &llm_input,
             .ai_config = &ai_config,
             .app_config = &app_config,
+            .ai_enabled = &ai_enabled,
         };
 
         const status = try handle_event(alloc, event, &state);
@@ -694,6 +703,7 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
 
             // Check if AI is configured
             const is_configured = switch (state.ai_config.*) {
+                .disabled => false,
                 .google_ai => |cfg| cfg.api_key.len > 0,
                 .claude_code => true,
             };
@@ -715,8 +725,9 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
                 };
                 defer alloc.free(models_json);
 
-                // For Claude Code, just display the message directly
+                // For Claude Code or disabled, just display the message directly
                 switch (state.ai_config.*) {
+                    .disabled => unreachable,
                     .claude_code => {
                         const models_msg = try std.fmt.allocPrint(alloc, "AI: {s}", .{models_json});
                         try state.llm_messages.append(alloc, models_msg);
@@ -763,6 +774,7 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
 
             // Build chat list context (only for Google AI, Claude Code has its own context)
             switch (state.ai_config.*) {
+                .disabled => unreachable,
                 .google_ai => {
                     var chat_list: std.ArrayList(u8) = .empty;
                     defer chat_list.deinit(alloc);
@@ -877,7 +889,7 @@ fn handle_key_action(alloc: std.mem.Allocator, state: *AppState, action: keybind
             return 0;
         },
         .switch_mode => state.active_mode.* = switch (state.active_mode.*) {
-            .chat => .llm,
+            .chat => if (state.ai_enabled.*) .llm else .chat_list,
             .llm => .chat_list,
             .chat_list => .chat,
         },

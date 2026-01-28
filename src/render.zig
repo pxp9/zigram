@@ -68,6 +68,97 @@ fn displayWidthWithMethod(text: []const u8, method: vaxis.gwidth.Method) usize {
     return vaxis.gwidth.gwidth(text, method);
 }
 
+fn renderAiPanel(
+    alloc: std.mem.Allocator,
+    render_alloc: std.mem.Allocator,
+    win: vaxis.Window,
+    state: *AppState,
+    chat_list_width: usize,
+    chat_width: usize,
+    llm_chat_width: usize,
+    panel_height: usize,
+    width_method: vaxis.gwidth.Method,
+) !vaxis.Window {
+    const llm_panel = win.child(.{
+        .x_off = @intCast(chat_list_width + chat_width),
+        .y_off = 1,
+        .width = @intCast(llm_chat_width),
+        .height = @intCast(panel_height),
+        .border = .{
+            .where = .all,
+            .style = .{ .fg = .{ .index = 5 } },
+        },
+    });
+    const llm_title = llm_panel.child(.{
+        .x_off = 2,
+        .y_off = 1,
+    });
+    _ = llm_title.printSegment(.{
+        .text = "AI Assistant",
+        .style = .{ .bold = true, .fg = .{ .index = 5 } },
+    }, .{});
+
+    const llm_messages_height = if (panel_height > 6) panel_height - 8 else 1;
+    const llm_messages_window = llm_panel.child(.{
+        .x_off = 2,
+        .y_off = 3,
+        .width = @intCast(if (llm_chat_width > 4) llm_chat_width - 4 else 1),
+        .height = @intCast(llm_messages_height),
+    });
+
+    state.llm_text_buffer.clear(alloc);
+
+    var char_count: usize = 0;
+    const panel_width = if (llm_chat_width > 6) llm_chat_width - 6 else 1;
+
+    for (state.llm_messages.items) |msg| {
+        const clean_msg = stripVariationSelectors(render_alloc, msg) catch msg;
+        const wrapped = wrapText(render_alloc, clean_msg, panel_width, width_method) catch continue;
+        const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{wrapped}) catch continue;
+        char_count += display_text.len;
+        state.llm_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
+    }
+
+    if (state.llm_loading.*) {
+        const loading_text = "\nLoading...";
+        try state.llm_text_buffer.append(alloc, .{ .bytes = loading_text });
+        try state.llm_text_buffer.updateStyle(alloc, .{
+            .begin = char_count,
+            .end = char_count + loading_text.len,
+            .style = .{ .italic = true, .fg = .{ .index = 3 } },
+        });
+    }
+
+    state.llm_text_view.draw(llm_messages_window, state.llm_text_buffer.*);
+
+    const llm_input_y = if (panel_height > 5) panel_height - 5 else 1;
+
+    const llm_prompt_win = llm_panel.child(.{
+        .x_off = 2,
+        .y_off = @intCast(llm_input_y + 1),
+    });
+    const llm_prompt_style = if (state.active_mode.* == .llm)
+        vaxis.Style{ .fg = .{ .index = 5 }, .bold = true }
+    else
+        vaxis.Style{ .fg = .{ .index = 8 } };
+    _ = llm_prompt_win.printSegment(.{ .text = "> ", .style = llm_prompt_style }, .{});
+
+    const llm_input_width = if (llm_chat_width > 6) llm_chat_width - 6 else 1;
+
+    const llm_input_win = llm_panel.child(.{
+        .x_off = 4,
+        .y_off = @intCast(llm_input_y),
+        .width = @intCast(llm_input_width),
+        .height = 3,
+        .border = .{
+            .where = .all,
+            .style = .{ .fg = .{ .index = 5 } },
+        },
+    });
+
+    return llm_input_win;
+}
+
 fn wrapText(alloc: std.mem.Allocator, text: []const u8, width: usize, method: vaxis.gwidth.Method) ![]const u8 {
     if (width == 0) return try alloc.dupe(u8, text);
 
@@ -132,7 +223,7 @@ fn wrapText(alloc: std.mem.Allocator, text: []const u8, width: usize, method: va
 pub const InputMode = utils.InputMode;
 pub const AppState = utils.AppState;
 
-pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
+pub fn render(alloc: std.mem.Allocator, state: *AppState) !void {
     var render_arena = std.heap.ArenaAllocator.init(alloc);
     defer render_arena.deinit();
     const render_alloc = render_arena.allocator();
@@ -167,12 +258,13 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
 
     const panel_height = if (height > 4) height - 2 else 2; // Minimum height of 2 for at least border
     const min_chat_list_width = 20; // Minimum width for chat list
+    const ai_enabled = state.ai_enabled.*;
     const chat_list_width = @max(width / 4, min_chat_list_width); // 25% for chat list, minimum 20
-    const chat_width = width / 2; // 50% for main chat
-    const llm_chat_width = if (width > chat_list_width + chat_width)
+    const chat_width = if (ai_enabled) width / 2 else (width * 3 / 4);
+    const llm_chat_width = if (ai_enabled)
         width - chat_list_width - chat_width
     else
-        0; // Remaining for LLM chat
+        0;
 
     const chat_list_panel = win.child(.{
         .x_off = 0,
@@ -357,82 +449,10 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
         },
     });
 
-    const llm_panel = win.child(.{
-        .x_off = @intCast(chat_list_width + chat_width),
-        .y_off = 1,
-        .width = llm_chat_width,
-        .height = panel_height,
-        .border = .{
-            .where = .all,
-            .style = .{ .fg = .{ .index = 5 } }, // Magenta border
-        },
-    });
-    const llm_title = llm_panel.child(.{
-        .x_off = 2,
-        .y_off = 1,
-    });
-    _ = llm_title.printSegment(.{
-        .text = "AI Assistant",
-        .style = .{ .bold = true, .fg = .{ .index = 5 } }, // Magenta
-    }, .{});
-
-    const llm_messages_height = if (panel_height > 6) panel_height - 8 else 1;
-    const llm_messages_window = llm_panel.child(.{
-        .x_off = 2,
-        .y_off = 3,
-        .width = if (llm_chat_width > 4) llm_chat_width - 4 else 1,
-        .height = llm_messages_height,
-    });
-
-    state.llm_text_buffer.clear(alloc);
-
-    var char_count: usize = 0;
-    const panel_width = if (llm_chat_width > 6) llm_chat_width - 6 else 1;
-
-    for (state.llm_messages.items) |msg| {
-        const clean_msg = stripVariationSelectors(render_alloc, msg) catch msg;
-        const wrapped = wrapText(render_alloc, clean_msg, panel_width, width_method) catch continue;
-        const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{wrapped}) catch continue;
-        char_count += display_text.len;
-        state.llm_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
-    }
-
-    if (state.llm_loading.*) {
-        const loading_text = "\nLoading...";
-        try state.llm_text_buffer.append(alloc, .{ .bytes = loading_text });
-        try state.llm_text_buffer.updateStyle(alloc, .{
-            .begin = char_count,
-            .end = char_count + loading_text.len,
-            .style = .{ .italic = true, .fg = .{ .index = 3 } },
-        });
-    }
-
-    state.llm_text_view.draw(llm_messages_window, state.llm_text_buffer.*);
-
-    const llm_input_y = if (panel_height > 5) panel_height - 5 else 1;
-
-    const llm_prompt_win = llm_panel.child(.{
-        .x_off = 2,
-        .y_off = llm_input_y + 1,
-    });
-    const llm_prompt_style = if (state.active_mode.* == .llm)
-        vaxis.Style{ .fg = .{ .index = 5 }, .bold = true }
+    const llm_input_win = if (ai_enabled)
+        try renderAiPanel(alloc, render_alloc, win, state, chat_list_width, chat_width, llm_chat_width, panel_height, width_method)
     else
-        vaxis.Style{ .fg = .{ .index = 8 } }; // Gray
-    _ = llm_prompt_win.printSegment(.{ .text = "> ", .style = llm_prompt_style }, .{});
-
-    const llm_input_width = if (llm_chat_width > 6) llm_chat_width - 6 else 1;
-
-    const llm_input_win = llm_panel.child(.{
-        .x_off = 4, // After "> "
-        .y_off = @intCast(llm_input_y),
-        .width = llm_input_width,
-        .height = 3, // Explicit height for border + content
-        .border = .{
-            .where = .all,
-            .style = .{ .fg = .{ .index = 5 } },
-        },
-    });
+        undefined;
 
     const mode_text = switch (state.active_mode.*) {
         .chat => "[CHAT]",
@@ -475,14 +495,14 @@ pub fn render(alloc: std.mem.Allocator, state: *const AppState) !void {
     }, .{ .col_offset = col });
 
     if (state.active_mode.* == .chat) {
-        state.llm_input.draw(llm_input_win);
+        if (ai_enabled) state.llm_input.draw(llm_input_win);
         state.chat_input.draw(input_win);
     } else if (state.active_mode.* == .llm) {
         state.chat_input.draw(input_win);
-        state.llm_input.draw(llm_input_win);
+        if (ai_enabled) state.llm_input.draw(llm_input_win);
     } else {
         state.chat_input.draw(input_win);
-        state.llm_input.draw(llm_input_win);
+        if (ai_enabled) state.llm_input.draw(llm_input_win);
         win.hideCursor();
     }
 

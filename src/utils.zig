@@ -116,4 +116,5 @@ pub const AppState = struct {
     llm_input: *TextInput,
     ai_config: *ai.ProviderConfig,
     app_config: *keybindings.AppConfig,
+    ai_enabled: *bool,
 };
