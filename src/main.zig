@@ -462,6 +462,10 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
 
                     try state.chat_messages_cache.put(update.chat_id, messages);
                     std.log.info("Loaded {d} messages for chat {d}", .{ messages.items.len, update.chat_id });
+
+                    // Auto-scroll to bottom when messages first load
+                    // Set to max value that will be clamped to actual max in render
+                    state.chat_text_view.scroll_view.scroll.y = std.math.maxInt(u16);
                 },
                 .message_sent => {
                     const message = update.data.message;
@@ -896,11 +900,13 @@ fn handle_key_action(alloc: std.mem.Allocator, state: *AppState, action: keybind
         .navigate_up => {
             if (state.active_mode.* == .chat_list) {
                 state.selected_chat_idx.* = (state.selected_chat_idx.* + state.chats.items.len - 1) % state.chats.items.len;
+                state.chat_text_view.scroll_view.scroll.y = std.math.maxInt(u16);
             }
         },
         .navigate_down => {
             if (state.active_mode.* == .chat_list) {
                 state.selected_chat_idx.* = (state.selected_chat_idx.* + 1) % state.chats.items.len;
+                state.chat_text_view.scroll_view.scroll.y = std.math.maxInt(u16);
             }
         },
         .select => try handle_select_action(alloc, state),

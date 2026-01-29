@@ -422,23 +422,6 @@ pub fn render(alloc: std.mem.Allocator, state: *AppState) !void {
         }
     }
 
-    // Auto-scroll to bottom when messages are first loaded
-    // Check if we have messages and scroll is at 0 (default position)
-    const should_auto_scroll = blk: {
-        if (state.chats.items.len == 0) break :blk false;
-        if (state.chat_text_view.scroll_view.scroll.y != 0) break :blk false;
-
-        const selected_chat = state.chats.items[state.selected_chat_idx.*];
-        const messages = state.chat_messages_cache.get(selected_chat.id) orelse break :blk false;
-        break :blk messages.items.len > 0;
-    };
-
-    if (should_auto_scroll) {
-        const buffer_rows = state.chat_text_buffer.rows;
-        const max_scroll = buffer_rows -| messages_height;
-        state.chat_text_view.scroll_view.scroll.y = max_scroll;
-    }
-
     state.chat_text_view.draw(messages_window, state.chat_text_buffer.*);
 
     const input_y = if (panel_height > 5) panel_height - 5 else 1;
