@@ -376,6 +376,8 @@ pub fn render(alloc: std.mem.Allocator, state: *AppState) !void {
         .height = messages_height,
     });
 
+    state.chat_text_buffer.clear(alloc);
+
     if (state.loading_messages.*) {
         const loading_text = "Loading messages...";
         try state.chat_text_buffer.append(alloc, .{ .bytes = loading_text });
@@ -385,7 +387,6 @@ pub fn render(alloc: std.mem.Allocator, state: *AppState) !void {
             .style = .{ .italic = true, .fg = .{ .index = 3 } },
         });
     } else if (state.chats.items.len > 0) {
-        state.chat_text_buffer.clear(alloc);
         const selected_chat = state.chats.items[state.selected_chat_idx.*];
         const messages_opt = state.chat_messages_cache.get(selected_chat.id);
 
@@ -399,7 +400,6 @@ pub fn render(alloc: std.mem.Allocator, state: *AppState) !void {
                     .style = .{ .italic = true, .fg = .{ .index = 8 } },
                 });
             } else {
-                state.chat_text_buffer.clear(alloc);
                 const chat_panel_width = if (chat_width > 8) chat_width - 8 else 1;
                 for (messages.items) |msg| {
                     const time_str = formatTimestamp(render_alloc, msg.timestamp, state.app_config.datetime_format) catch "??:??";
@@ -420,6 +420,23 @@ pub fn render(alloc: std.mem.Allocator, state: *AppState) !void {
                 .style = .{ .italic = true, .fg = .{ .index = 6 } },
             });
         }
+    }
+
+    // Auto-scroll to bottom when messages are first loaded
+    // Check if we have messages and scroll is at 0 (default position)
+    const should_auto_scroll = blk: {
+        if (state.chats.items.len == 0) break :blk false;
+        if (state.chat_text_view.scroll_view.scroll.y != 0) break :blk false;
+
+        const selected_chat = state.chats.items[state.selected_chat_idx.*];
+        const messages = state.chat_messages_cache.get(selected_chat.id) orelse break :blk false;
+        break :blk messages.items.len > 0;
+    };
+
+    if (should_auto_scroll) {
+        const buffer_rows = state.chat_text_buffer.rows;
+        const max_scroll = buffer_rows -| messages_height;
+        state.chat_text_view.scroll_view.scroll.y = max_scroll;
     }
 
     state.chat_text_view.draw(messages_window, state.chat_text_buffer.*);

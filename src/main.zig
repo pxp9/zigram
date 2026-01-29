@@ -680,7 +680,7 @@ fn handle_select_action(alloc: std.mem.Allocator, state: *AppState) !void {
                 std.log.info("Requesting messages for chat: {s}", .{selected_chat.title});
                 state.loading_messages.* = true;
                 try state.telegram_queue.post(.{
-                    .load_chat_history = .{ .chat_id = selected_chat.id, .limit = 10 },
+                    .load_chat_history = .{ .chat_id = selected_chat.id, .limit = 50 },
                 });
             }
             state.chat_input.reset();

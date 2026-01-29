@@ -257,7 +257,107 @@ pub fn getChatHistory(
     client: *tdlib.Client,
     allocator: std.mem.Allocator,
     chat_id: i64,
+    desired_count: i32,
+) !std.ArrayList(Message) {
+    var all_messages: std.ArrayList(Message) = .empty;
+    errdefer {
+        for (all_messages.items) |*msg| {
+            msg.deinit(allocator);
+        }
+        all_messages.deinit(allocator);
+    }
+
+    var from_message_id: i64 = 0;
+    const batch_size: i32 = 20;
+    var total_fetched: i32 = 0;
+
+    // First, try to fetch from local database only
+    std.log.info("Attempting to fetch messages from local database first", .{});
+    var local_batch = getChatHistoryBatch(client, allocator, chat_id, 0, desired_count, true) catch |err| blk: {
+        std.log.warn("Failed to fetch from local database: {any}, will fetch from server", .{err});
+        const empty_list: std.ArrayList(Message) = .empty;
+        break :blk empty_list;
+    };
+
+    if (local_batch.items.len >= desired_count) {
+        std.log.info("Got {d} messages from local database (desired: {d}), no need to fetch from server", .{ local_batch.items.len, desired_count });
+        return local_batch;
+    } else if (local_batch.items.len > 0) {
+        std.log.info("Got {d} messages from local database, fetching remaining {d} from server", .{ local_batch.items.len, desired_count - @as(i32, @intCast(local_batch.items.len)) });
+        try all_messages.appendSlice(allocator, local_batch.items);
+        total_fetched = @intCast(local_batch.items.len);
+        from_message_id = local_batch.items[local_batch.items.len - 1].id;
+        local_batch.deinit(allocator);
+    } else {
+        std.log.info("No messages in local database, fetching from server", .{});
+        local_batch.deinit(allocator);
+    }
+
+    // Fetch remaining messages from server
+    while (total_fetched < desired_count) {
+        const remaining = desired_count - total_fetched;
+        const fetch_count = @min(batch_size, remaining);
+
+        std.log.info("Fetching batch from server: from_message_id={d}, count={d}, total_so_far={d}/{d}", .{ from_message_id, fetch_count, total_fetched, desired_count });
+
+        var batch = getChatHistoryBatch(client, allocator, chat_id, from_message_id, fetch_count, false) catch |err| {
+            std.log.err("Failed to fetch batch: {any}", .{err});
+            if (all_messages.items.len > 0) {
+                return all_messages;
+            }
+            return err;
+        };
+
+        if (batch.items.len == 0) {
+            std.log.info("No more messages available, stopping at {d} messages", .{all_messages.items.len});
+            break;
+        }
+
+        // Batch is already in chronological order (oldest to newest) after reversal
+        // TDLib returns newest messages first when from_message_id=0
+        // Subsequent calls with from_message_id return older messages
+        // Strategy: prepend older batches before newer ones
+        const is_first_batch = from_message_id == 0;
+        const oldest_in_batch = batch.items[0].id;
+
+        std.log.info("Batch: {d} messages (oldest ID: {d}, newest ID: {d})", .{
+            batch.items.len,
+            oldest_in_batch,
+            batch.items[batch.items.len - 1].id,
+        });
+
+        if (is_first_batch) {
+            for (batch.items) |msg| {
+                try all_messages.append(allocator, msg);
+            }
+        } else {
+            try all_messages.insertSlice(allocator, 0, batch.items);
+        }
+
+        total_fetched += @intCast(batch.items.len);
+        batch.deinit(allocator);
+        from_message_id = oldest_in_batch;
+
+        if (batch.items.len < fetch_count) {
+            std.log.info("Received fewer messages than requested ({d} < {d}), no more messages available", .{ batch.items.len, fetch_count });
+            break;
+        }
+
+        // Sleep to avoid "Too many requests" errors
+        std.Thread.sleep(200 * std.time.ns_per_ms);
+    }
+
+    std.log.info("Finished fetching messages: got {d} messages", .{all_messages.items.len});
+    return all_messages;
+}
+
+pub fn getChatHistoryBatch(
+    client: *tdlib.Client,
+    allocator: std.mem.Allocator,
+    chat_id: i64,
+    from_message_id: i64,
     limit: i32,
+    only_local: bool,
 ) !std.ArrayList(Message) {
     var messages: std.ArrayList(Message) = .empty;
     errdefer {
@@ -280,9 +380,10 @@ pub fn getChatHistory(
     const request_obj = .{
         .@"@type" = "getChatHistory",
         .chat_id = chat_id,
-        .from_message_id = 0,
+        .from_message_id = from_message_id,
         .offset = 0,
         .limit = limit,
+        .only_local = only_local,
     };
     const request = try utils.formatJsonZ(allocator, request_obj);
     defer allocator.free(request);
