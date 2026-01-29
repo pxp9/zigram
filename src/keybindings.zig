@@ -20,6 +20,7 @@ pub const KeyAction = enum {
 
 pub const AppConfig = struct {
     datetime_format: []const u8,
+    message_limit: usize,
     allocated: bool = false,
 
     pub fn deinit(self: *AppConfig, alloc: std.mem.Allocator) void {
@@ -30,6 +31,7 @@ pub const AppConfig = struct {
 };
 
 pub const DEFAULT_DATETIME_FORMAT = "%H:%M";
+pub const DEFAULT_MESSAGE_LIMIT: usize = 50;
 
 pub const KeyBindings = struct {
     quit: []const u8,
@@ -231,6 +233,7 @@ pub fn loadAppConfig(alloc: std.mem.Allocator) !AppConfig {
     const file = std.fs.openFileAbsolute(config_path, .{}) catch {
         return AppConfig{
             .datetime_format = DEFAULT_DATETIME_FORMAT,
+            .message_limit = DEFAULT_MESSAGE_LIMIT,
             .allocated = false,
         };
     };
@@ -244,6 +247,7 @@ pub fn loadAppConfig(alloc: std.mem.Allocator) !AppConfig {
         std.log.err("Using default app config", .{});
         return AppConfig{
             .datetime_format = DEFAULT_DATETIME_FORMAT,
+            .message_limit = DEFAULT_MESSAGE_LIMIT,
             .allocated = false,
         };
     };
@@ -252,6 +256,7 @@ pub fn loadAppConfig(alloc: std.mem.Allocator) !AppConfig {
     const root = parsed.value;
     var config = AppConfig{
         .datetime_format = DEFAULT_DATETIME_FORMAT,
+        .message_limit = DEFAULT_MESSAGE_LIMIT,
         .allocated = true,
     };
 
@@ -259,6 +264,10 @@ pub fn loadAppConfig(alloc: std.mem.Allocator) !AppConfig {
         config.datetime_format = try alloc.dupe(u8, dt_format.string);
     } else {
         config.datetime_format = try alloc.dupe(u8, DEFAULT_DATETIME_FORMAT);
+    }
+
+    if (root.object.get("message_limit")) |msg_limit| {
+        config.message_limit = @intCast(msg_limit.integer);
     }
 
     return config;
