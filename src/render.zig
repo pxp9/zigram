@@ -223,6 +223,64 @@ fn wrapText(alloc: std.mem.Allocator, text: []const u8, width: usize, method: va
 pub const InputMode = utils.InputMode;
 pub const AppState = utils.AppState;
 
+fn renderChatMessages(
+    alloc: std.mem.Allocator,
+    render_alloc: std.mem.Allocator,
+    state: *AppState,
+    chat_width: usize,
+    width_method: vaxis.gwidth.Method,
+) !void {
+    if (state.loading_messages.*) {
+        const loading_text = "Loading messages...";
+        try state.chat_text_buffer.append(alloc, .{ .bytes = loading_text });
+        try state.chat_text_buffer.updateStyle(alloc, .{
+            .begin = 0,
+            .end = loading_text.len,
+            .style = .{ .italic = true, .fg = .{ .index = 3 } },
+        });
+        return;
+    }
+
+    if (state.chats.items.len == 0) return;
+
+    const selected_chat = state.chats.items[state.selected_chat_idx.*];
+    const messages_opt = state.chat_messages_cache.get(selected_chat.id);
+
+    if (messages_opt == null) {
+        const prompt_text = "Press Enter to load messages";
+        try state.chat_text_buffer.append(alloc, .{ .bytes = prompt_text });
+        try state.chat_text_buffer.updateStyle(alloc, .{
+            .begin = 0,
+            .end = prompt_text.len,
+            .style = .{ .italic = true, .fg = .{ .index = 6 } },
+        });
+        return;
+    }
+
+    const messages = messages_opt.?;
+    if (messages.items.len == 0) {
+        const no_msg_text = "No messages";
+        try state.chat_text_buffer.append(alloc, .{ .bytes = no_msg_text });
+        try state.chat_text_buffer.updateStyle(alloc, .{
+            .begin = 0,
+            .end = no_msg_text.len,
+            .style = .{ .italic = true, .fg = .{ .index = 8 } },
+        });
+        return;
+    }
+
+    const chat_panel_width = if (chat_width > 8) chat_width - 8 else 1;
+    for (messages.items) |msg| {
+        const time_str = formatTimestamp(render_alloc, msg.timestamp, state.app_config.datetime_format) catch "??:??";
+        const clean_sender = stripVariationSelectors(render_alloc, msg.sender_name) catch msg.sender_name;
+        const clean_content = stripVariationSelectors(render_alloc, msg.content) catch msg.content;
+        const msg_text = std.fmt.allocPrint(render_alloc, "[{s}] {s}: {s}", .{ time_str, clean_sender, clean_content }) catch continue;
+        const wrapped = wrapText(render_alloc, msg_text, chat_panel_width, width_method) catch continue;
+        const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{wrapped}) catch continue;
+        state.chat_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
+    }
+}
+
 pub fn render(alloc: std.mem.Allocator, state: *AppState) !void {
     var render_arena = std.heap.ArenaAllocator.init(alloc);
     defer render_arena.deinit();
@@ -377,50 +435,7 @@ pub fn render(alloc: std.mem.Allocator, state: *AppState) !void {
     });
 
     state.chat_text_buffer.clear(alloc);
-
-    if (state.loading_messages.*) {
-        const loading_text = "Loading messages...";
-        try state.chat_text_buffer.append(alloc, .{ .bytes = loading_text });
-        try state.chat_text_buffer.updateStyle(alloc, .{
-            .begin = 0,
-            .end = loading_text.len,
-            .style = .{ .italic = true, .fg = .{ .index = 3 } },
-        });
-    } else if (state.chats.items.len > 0) {
-        const selected_chat = state.chats.items[state.selected_chat_idx.*];
-        const messages_opt = state.chat_messages_cache.get(selected_chat.id);
-
-        if (messages_opt) |messages| {
-            if (messages.items.len == 0) {
-                const no_msg_text = "No messages";
-                try state.chat_text_buffer.append(alloc, .{ .bytes = no_msg_text });
-                try state.chat_text_buffer.updateStyle(alloc, .{
-                    .begin = 0,
-                    .end = no_msg_text.len,
-                    .style = .{ .italic = true, .fg = .{ .index = 8 } },
-                });
-            } else {
-                const chat_panel_width = if (chat_width > 8) chat_width - 8 else 1;
-                for (messages.items) |msg| {
-                    const time_str = formatTimestamp(render_alloc, msg.timestamp, state.app_config.datetime_format) catch "??:??";
-                    const clean_sender = stripVariationSelectors(render_alloc, msg.sender_name) catch msg.sender_name;
-                    const clean_content = stripVariationSelectors(render_alloc, msg.content) catch msg.content;
-                    const msg_text = std.fmt.allocPrint(render_alloc, "[{s}] {s}: {s}", .{ time_str, clean_sender, clean_content }) catch continue;
-                    const wrapped = wrapText(render_alloc, msg_text, chat_panel_width, width_method) catch continue;
-                    const display_text = std.fmt.allocPrint(render_alloc, "{s}\n", .{wrapped}) catch continue;
-                    state.chat_text_buffer.append(alloc, .{ .bytes = display_text }) catch continue;
-                }
-            }
-        } else {
-            const prompt_text = "Press Enter to load messages";
-            try state.chat_text_buffer.append(alloc, .{ .bytes = prompt_text });
-            try state.chat_text_buffer.updateStyle(alloc, .{
-                .begin = 0,
-                .end = prompt_text.len,
-                .style = .{ .italic = true, .fg = .{ .index = 6 } },
-            });
-        }
-    }
+    try renderChatMessages(alloc, render_alloc, state, chat_width, width_method);
 
     state.chat_text_view.draw(messages_window, state.chat_text_buffer.*);
 
