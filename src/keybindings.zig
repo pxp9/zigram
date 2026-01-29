@@ -15,6 +15,7 @@ pub const KeyAction = enum {
     send_message,
     delete_char,
     reload_config,
+    load_more_messages,
     none,
 };
 
@@ -46,6 +47,7 @@ pub const KeyBindings = struct {
     select: []const u8,
     backspace: []const u8,
     reload_config: []const u8,
+    load_more_messages: []const u8,
     allocated: bool = false,
 
     pub fn deinit(self: *KeyBindings, alloc: std.mem.Allocator) void {
@@ -62,6 +64,7 @@ pub const KeyBindings = struct {
             alloc.free(self.select);
             alloc.free(self.backspace);
             alloc.free(self.reload_config);
+            alloc.free(self.load_more_messages);
         }
     }
 };
@@ -78,6 +81,7 @@ pub const DEFAULT_SCROLL_DOWN = "down";
 pub const DEFAULT_SELECT = "enter";
 pub const DEFAULT_BACKSPACE = "backspace";
 pub const DEFAULT_RELOAD_CONFIG = "ctrl+r";
+pub const DEFAULT_LOAD_MORE_MESSAGES = "ctrl+l";
 
 pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
     const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
@@ -99,6 +103,7 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
             .select = DEFAULT_SELECT,
             .backspace = DEFAULT_BACKSPACE,
             .reload_config = DEFAULT_RELOAD_CONFIG,
+            .load_more_messages = DEFAULT_LOAD_MORE_MESSAGES,
             .allocated = false,
         };
     };
@@ -123,6 +128,7 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
             .select = DEFAULT_SELECT,
             .backspace = DEFAULT_BACKSPACE,
             .reload_config = DEFAULT_RELOAD_CONFIG,
+            .load_more_messages = DEFAULT_LOAD_MORE_MESSAGES,
             .allocated = false,
         };
     };
@@ -141,6 +147,7 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
         .select = DEFAULT_SELECT,
         .backspace = DEFAULT_BACKSPACE,
         .reload_config = DEFAULT_RELOAD_CONFIG,
+        .load_more_messages = DEFAULT_LOAD_MORE_MESSAGES,
         .allocated = true,
     };
 
@@ -206,6 +213,11 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
         } else {
             keybindings.reload_config = try alloc.dupe(u8, DEFAULT_RELOAD_CONFIG);
         }
+        if (kb_obj.object.get("load_more_messages")) |v| {
+            keybindings.load_more_messages = try alloc.dupe(u8, v.string);
+        } else {
+            keybindings.load_more_messages = try alloc.dupe(u8, DEFAULT_LOAD_MORE_MESSAGES);
+        }
     } else {
         keybindings.quit = try alloc.dupe(u8, DEFAULT_QUIT);
         keybindings.quit_ctrl = try alloc.dupe(u8, DEFAULT_QUIT_CTRL);
@@ -219,6 +231,7 @@ pub fn loadKeybindings(alloc: std.mem.Allocator) !KeyBindings {
         keybindings.select = try alloc.dupe(u8, DEFAULT_SELECT);
         keybindings.backspace = try alloc.dupe(u8, DEFAULT_BACKSPACE);
         keybindings.reload_config = try alloc.dupe(u8, DEFAULT_RELOAD_CONFIG);
+        keybindings.load_more_messages = try alloc.dupe(u8, DEFAULT_LOAD_MORE_MESSAGES);
     }
 
     return keybindings;
@@ -370,6 +383,7 @@ pub fn buildModeKeymap(alloc: std.mem.Allocator, keybindings: KeyBindings) !Mode
         .{ .key = keybindings.select, .action = .select },
         .{ .key = keybindings.backspace, .action = .delete_char },
         .{ .key = keybindings.reload_config, .action = .reload_config },
+        .{ .key = keybindings.load_more_messages, .action = .load_more_messages },
     };
 
     for (global_bindings) |binding| {

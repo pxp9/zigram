@@ -460,12 +460,19 @@ fn handle_event(alloc: std.mem.Allocator, event: Event, state: *AppState) !i32 {
                         try messages.append(alloc, message);
                     }
 
-                    try state.chat_messages_cache.put(update.chat_id, messages);
-                    std.log.info("Loaded {d} messages for chat {d}", .{ messages.items.len, update.chat_id });
+                    // Check if we already have messages - if so, prepend the older messages
+                    if (state.chat_messages_cache.getPtr(update.chat_id)) |existing_messages| {
+                        std.log.info("Prepending {d} older messages to existing {d} messages for chat {d}", .{ messages.items.len, existing_messages.items.len, update.chat_id });
+                        try existing_messages.insertSlice(alloc, 0, messages.items);
+                        messages.deinit(alloc);
+                    } else {
+                        std.log.info("Loaded {d} messages for chat {d}", .{ messages.items.len, update.chat_id });
+                        try state.chat_messages_cache.put(update.chat_id, messages);
 
-                    // Auto-scroll to bottom when messages first load
-                    // Set to max value that will be clamped to actual max in render
-                    state.chat_text_view.scroll_view.scroll.y = std.math.maxInt(u16);
+                        // Auto-scroll to bottom when messages first load
+                        // Set to max value that will be clamped to actual max in render
+                        state.chat_text_view.scroll_view.scroll.y = std.math.maxInt(u16);
+                    }
                 },
                 .message_sent => {
                     const message = update.data.message;
@@ -844,6 +851,29 @@ fn extractMessageContent(msg_obj: std.json.Value) []const u8 {
     return "";
 }
 
+fn handle_load_more_messages(state: *AppState) !void {
+    if (state.active_mode.* != .chat) return;
+    if (state.chats.items.len == 0) return;
+
+    const selected_chat = state.chats.items[state.selected_chat_idx.*];
+    const messages = state.chat_messages_cache.get(selected_chat.id) orelse return;
+    if (messages.items.len == 0) return;
+
+    // Get the oldest (first) message ID
+    const oldest_message_id = messages.items[0].id;
+
+    std.log.info("Loading more messages from chat: {s}, from message ID: {d}", .{ selected_chat.title, oldest_message_id });
+    state.loading_messages.* = true;
+
+    try state.telegram_queue.post(.{
+        .load_more_messages = .{
+            .chat_id = selected_chat.id,
+            .limit = state.app_config.message_limit,
+            .from_message_id = oldest_message_id,
+        },
+    });
+}
+
 fn handle_reload_config(alloc: std.mem.Allocator, state: *AppState) !void {
     var new_keybindings = keybindings.loadKeybindings(alloc) catch |err| {
         std.log.err("Failed to reload keybindings: {any}", .{err});
@@ -911,6 +941,7 @@ fn handle_key_action(alloc: std.mem.Allocator, state: *AppState, action: keybind
         },
         .select => try handle_select_action(alloc, state),
         .reload_config => try handle_reload_config(alloc, state),
+        .load_more_messages => try handle_load_more_messages(state),
         .scroll_up, .scroll_down, .delete_char, .send_message, .none => {},
     }
     return 1;

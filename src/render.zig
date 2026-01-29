@@ -230,7 +230,13 @@ fn renderChatMessages(
     chat_width: usize,
     width_method: vaxis.gwidth.Method,
 ) !void {
-    if (state.loading_messages.*) {
+    if (state.chats.items.len == 0) return;
+
+    const selected_chat = state.chats.items[state.selected_chat_idx.*];
+    const messages_opt = state.chat_messages_cache.get(selected_chat.id);
+
+    // If loading and no messages cached yet, show loading message
+    if (state.loading_messages.* and messages_opt == null) {
         const loading_text = "Loading messages...";
         try state.chat_text_buffer.append(alloc, .{ .bytes = loading_text });
         try state.chat_text_buffer.updateStyle(alloc, .{
@@ -240,11 +246,6 @@ fn renderChatMessages(
         });
         return;
     }
-
-    if (state.chats.items.len == 0) return;
-
-    const selected_chat = state.chats.items[state.selected_chat_idx.*];
-    const messages_opt = state.chat_messages_cache.get(selected_chat.id);
 
     if (messages_opt == null) {
         const prompt_text = "Press Enter to load messages";
@@ -267,6 +268,19 @@ fn renderChatMessages(
             .style = .{ .italic = true, .fg = .{ .index = 8 } },
         });
         return;
+    }
+
+    // Show loading indicator at the top if loading more messages
+    var char_offset: usize = 0;
+    if (state.loading_messages.*) {
+        const loading_text = "Loading older messages...\n";
+        try state.chat_text_buffer.append(alloc, .{ .bytes = loading_text });
+        try state.chat_text_buffer.updateStyle(alloc, .{
+            .begin = 0,
+            .end = loading_text.len,
+            .style = .{ .italic = true, .fg = .{ .index = 3 } },
+        });
+        char_offset = loading_text.len;
     }
 
     const chat_panel_width = if (chat_width > 8) chat_width - 8 else 1;
@@ -481,9 +495,9 @@ pub fn render(alloc: std.mem.Allocator, state: *AppState) !void {
         .chat_list => vaxis.Color{ .index = 4 }, // Blue - matches chat list border
     };
 
-    var help_buf: [256]u8 = undefined;
+    var help_buf: [512]u8 = undefined;
     const mode_help = switch (state.active_mode.*) {
-        .chat, .llm => try std.fmt.bufPrint(&help_buf, "{s}: Switch | {s}: Send | {s}: Delete", .{ state.keybindings.*.switch_mode, state.keybindings.*.select, state.keybindings.*.backspace }),
+        .chat, .llm => try std.fmt.bufPrint(&help_buf, "{s}: Switch | {s}: Send | {s}: Delete | {s}: Load More", .{ state.keybindings.*.switch_mode, state.keybindings.*.select, state.keybindings.*.backspace, state.keybindings.*.load_more_messages }),
         .chat_list => try std.fmt.bufPrint(&help_buf, "{s}: Switch | {s}/{s}: Up | {s}/{s}: Down | {s}: Select", .{ state.keybindings.*.switch_mode, state.keybindings.*.navigate_up, state.keybindings.*.navigate_up_alt, state.keybindings.*.navigate_down, state.keybindings.*.navigate_down_alt, state.keybindings.*.select }),
     };
 

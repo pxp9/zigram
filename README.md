@@ -63,7 +63,8 @@ You can customize keybindings by creating or editing
     "navigate_down_alt": "down",
     "select": "enter",
     "backspace": "backspace",
-    "reload_config": "ctrl+r"
+    "reload_config": "ctrl+r",
+    "load_more_messages": "ctrl+l"
   }
 }
 ```
@@ -79,6 +80,7 @@ You can customize keybindings by creating or editing
 | Select | `Enter` | Select chat or send message |
 | Delete Character | `Backspace` | Delete character in input field |
 | Reload Config | `Ctrl+R` | Reload keybindings from config file |
+| Load More Messages | `Ctrl+L` | Load older messages in current chat (when in chat mode) |
 | Scroll Messages | `Page Up/Down` | Scroll through chat messages (when input is empty) |
 | Jump to Top/Bottom | `Home/End` | Jump to first/last message (when input is empty) |
 

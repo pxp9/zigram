@@ -653,6 +653,7 @@ pub const TelegramUpdate = struct {
 pub const TelegramRequestKind = enum {
     load_chats,
     load_chat_history,
+    load_more_messages,
     send_message,
     shutdown,
 };
@@ -660,6 +661,7 @@ pub const TelegramRequestKind = enum {
 pub const TelegramRequest = union(TelegramRequestKind) {
     load_chats: struct { count: usize },
     load_chat_history: struct { chat_id: i64, limit: usize },
+    load_more_messages: struct { chat_id: i64, limit: usize, from_message_id: i64 },
     send_message: struct { chat_id: i64, text: []const u8 },
     shutdown: void,
 };
@@ -697,6 +699,31 @@ pub fn telegramUpdateLoop(ctx: utils.TelegramThreadContext) void {
                     std.log.info("Processing load_chat_history request, chat_id={d}, limit={d}", .{ req.chat_id, req.limit });
                     var messages = getChatHistory(ctx.client, ctx.alloc, req.chat_id, @intCast(req.limit)) catch |err| {
                         std.log.err("Failed to load chat history: {any}", .{err});
+                        continue;
+                    };
+
+                    const messages_json = std.fmt.allocPrint(ctx.alloc, "{f}", .{std.json.fmt(messages.items, .{})}) catch continue;
+                    const data_copy = messages_json;
+
+                    ctx.loop.postEvent(.{
+                        .telegram_update = .{
+                            .kind = .chat_history_loaded,
+                            .chat_id = req.chat_id,
+                            .data = .{ .json = data_copy },
+                        },
+                    });
+
+                    for (messages.items) |*msg| {
+                        msg.deinit(ctx.alloc);
+                    }
+                    messages.deinit(ctx.alloc);
+                },
+                .load_more_messages => |req| {
+                    std.log.info("Processing load_more_messages request, chat_id={d}, limit={d}, from_message_id={d}", .{ req.chat_id, req.limit, req.from_message_id });
+
+                    // Load older messages starting from from_message_id
+                    var messages = getChatHistoryBatch(ctx.client, ctx.alloc, req.chat_id, req.from_message_id, @intCast(req.limit), false) catch |err| {
+                        std.log.err("Failed to load more messages: {any}", .{err});
                         continue;
                     };
 
