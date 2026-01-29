@@ -85,6 +85,22 @@ You can customize keybindings by creating or editing
 After modifying keybindings, press `Ctrl+R` within the application to reload the
 configuration without restarting.
 
+### Message Limit
+
+You can configure how many messages are loaded when opening a chat using the `message_limit` option:
+
+```json
+{
+  "message_limit": 100
+}
+```
+
+**Default**: 50 messages
+
+This setting controls the number of messages fetched from Telegram when:
+- Opening a chat for the first time
+- Navigating between chats
+
 ### DateTime Format
 
 You can customize how message timestamps are displayed using the `datetime_format` option in your config file. This uses C's strftime format syntax.
